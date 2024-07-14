@@ -1,5 +1,6 @@
 import functools
 import io
+import re
 from typing import Any
 
 import keyvalues
@@ -110,3 +111,100 @@ def test_errors_and_macros():
         ]),
     ]
     # fmt: on
+
+
+def deindent(string):
+    string = string.removeprefix("\n")
+    indent = min(
+        re.match(r"^[^\S\n]*", line).end()  # type: ignore[union-attr]
+        for line in string.split("\n")
+        if line
+    )
+    return re.sub(rf"^[^\S\n]{{{indent}}}", "", string, flags=re.MULTILINE)
+
+
+def test_formatter_default():
+    tokens = lexer('1 { "2" [] { 3 c [] } } 4 [] {}')
+    parser = pipeline(
+        keyvalues.parser,
+        keyvalues.formatter(indent="    "),
+    )
+    tokens = parser(tokens, 0)
+    assert writer(tokens) == deindent(
+        """
+        1
+        {
+            "2" []
+            {
+                3 c []
+            }
+        }
+        4 []
+        {
+        }
+        """
+    )
+
+
+def test_formatter_compact():
+    tokens = lexer('1 { "2" [] { 3 c [] } } 4 [] {}')
+    parser = pipeline(
+        keyvalues.parser,
+        keyvalues.formatter(
+            indent="    ",
+            newline_before_section=False,
+            collapse_empty_sections=True,
+        ),
+    )
+    tokens = parser(tokens, 0)
+    assert writer(tokens) == deindent(
+        """
+        1 {
+            "2" [] {
+                3 c []
+            }
+        }
+        4 [] {}
+        """
+    )
+
+
+def test_formatter_blanks():
+    tokens = lexer("\n\n\n1\n\n\n2\n\n\n3\n\n\n4\n\n\n")
+    parser = pipeline(
+        keyvalues.parser,
+        keyvalues.formatter(
+            indent="    ",
+            max_consecutive_blank_lines=1,
+        ),
+    )
+    tokens = parser(tokens, 0)
+    assert writer(tokens) == deindent(
+        """
+        1 2
+
+        3 4
+        """
+    )
+
+
+def test_formatter_comments():
+    tokens = lexer("a //1\n { b  //2 \n[] c\n\n//3\n }//=")
+    parser = pipeline(
+        keyvalues.parser,
+        keyvalues.formatter(
+            indent="    ",
+            max_consecutive_blank_lines=0,
+        ),
+    )
+    tokens = parser(tokens, 0)
+    assert writer(tokens) == deindent(
+        """
+        a  // 1
+        {
+            b  // 2
+            [] c
+            // 3
+        }  //=
+        """
+    )
