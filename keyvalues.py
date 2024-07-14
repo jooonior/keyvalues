@@ -661,6 +661,31 @@ def formatter(
     return formatter
 
 
+def autoquote(regex: str = "", *, preserve: bool = False) -> ParserDecorator:
+    if regex:
+        regex = f"|(?:{regex})"
+    regex = r'[\s"{}]' + regex
+
+    pattern = re.compile(regex)
+
+    @parser_decorator
+    def autoquote(tokens: Iterable[Token], _depth: int) -> Iterator[Token]:
+        for token in tokens:
+            if preserve and token.tag is TokenTag.QUOTED:
+                yield token
+                continue
+
+            if token.role in {TokenRole.KEY, TokenRole.VALUE}:
+                if pattern.search(token.data):
+                    token.tag = TokenTag.QUOTED
+                else:
+                    token.tag = TokenTag.PLAIN
+
+            yield token
+
+    return autoquote
+
+
 def pipeline(parser: Parser, *decorators: Callable[[Parser], Parser]) -> Parser:
     """Apply `decorators` on `parser`."""
     return functools.reduce(
@@ -808,6 +833,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
 
     format_group.add_argument(
+        "-q",
+        "--quote",
+        type=re.compile,
+        help="regex matching tokens to quote (default: preserve quotes)",
+    )
+
+    format_group.add_argument(
         "-b",
         "--maxblanks",
         type=int,
@@ -835,13 +867,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def make_formatter_from_args(args: argparse.Namespace) -> ParserDecorator:
+def make_parser_from_args(parser: Parser, args: argparse.Namespace) -> Parser:
+    if args.quote:
+        parser = autoquote(args.quote.pattern)(parser)
+
     return formatter(
         indent=args.indent,
         newline_before_section=not args.compact,
         collapse_empty_sections=args.compact,
         max_consecutive_blank_lines=args.maxblanks,
-    )
+    )(parser)
 
 
 def main() -> int:
@@ -864,7 +899,7 @@ def main() -> int:
                     tokens = parse_file(file, parse)
                     collections.deque(tokens, maxlen=0)
             case "format":
-                parse = pipeline(parse, make_formatter_from_args(args))
+                parse = make_parser_from_args(parse, args)
                 tokens = parse_file(args.file, parse)
                 writer(tokens, sys.stdout)
 
