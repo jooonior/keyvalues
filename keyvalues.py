@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import collections
 import dataclasses
 import enum
 import functools
@@ -740,18 +742,132 @@ def writer(tokens: Iterable[Token], file: TextIO) -> None:
         file.write(str(token))
 
 
+class SubcommandHelpFormatter(argparse.HelpFormatter):
+    def _format_action(self, action: argparse.Action) -> str:
+        parts = super()._format_action(action)
+        if action.nargs == argparse.PARSER:
+            # Remove metavar from subparser list and decrease its indentation.
+            parts = re.sub(r"^.*\n  |(\n)  ", r"\1", parts)
+        return parts
+
+
+def make_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(formatter_class=SubcommandHelpFormatter)
+
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="command",
+    )
+
+    check_subparser = subparsers.add_parser(
+        "check",
+        help="check syntax of KeyValues",
+        description=(
+            "Checks the syntax of input file(s) and reports any errors. "
+            "If not input files are specified, reads from stdin instead. "
+        ),
+    )
+    check_subparser.add_argument(
+        "files",
+        nargs="*",
+        type=argparse.FileType("r"),
+        default=[sys.stdin],
+        help="input file",
+        metavar="file",
+    )
+
+    file_parser = argparse.ArgumentParser(add_help=False)
+    file_parser.add_argument(
+        "file",
+        nargs="?",
+        type=argparse.FileType("r"),
+        default=sys.stdin,
+        help="input file (default: read from stdin instead)",
+    )
+
+    format_parser = argparse.ArgumentParser(add_help=False)
+    format_group = format_parser.add_argument_group("output format options")
+
+    # Not lambda because error message shows the function name.
+    def indentation(string: str) -> str:
+        if string.isspace():
+            return string
+        return " " * int(string)
+
+    format_group.add_argument(
+        "-i",
+        "--indent",
+        type=indentation,
+        default="\t",
+        help=(
+            "indentation size in spaces per level"
+            " (default: use single TAB instead)"
+        ),
+    )
+
+    format_group.add_argument(
+        "-b",
+        "--maxblanks",
+        type=int,
+        default=1,
+        help="maximum number of consecutive blank lines (default: 1)",
+    )
+
+    format_group.add_argument(
+        "-c",
+        "--compact",
+        dest="compact",
+        action="store_true",
+        help="put { on the same line as section key",
+    )
+
+    subparsers.add_parser(
+        "format",
+        help="format KeyValues",
+        description=(
+            "Formats the input file and prints the formatted output to stdout."
+        ),
+        parents=[file_parser, format_parser],
+    )
+
+    return parser
+
+
+def make_formatter_from_args(args: argparse.Namespace) -> ParserDecorator:
+    return formatter(
+        indent=args.indent,
+        newline_before_section=not args.compact,
+        collapse_empty_sections=args.compact,
+        max_consecutive_blank_lines=args.maxblanks,
+    )
+
+
 def main() -> int:
-    tokens = lexer(sys.stdin)
+    args = make_argument_parser().parse_args()
+
     parse = pipeline(
         parser,
         report_errors(treat_empty_root_key_as_error=False),
         parse_macros("#base", "#include"),
-        formatter(),
     )
-    tokens = parse(tokens, 0)
+
+    def parse_file(file: TextIO, parser: Parser) -> Iterator[Token]:
+        tokens = lexer(file)
+        return parser(tokens, 0)
 
     try:
-        writer(tokens, sys.stdout)
+        match args.command:
+            case "check":
+                for file in args.files:
+                    tokens = parse_file(file, parse)
+                    collections.deque(tokens, maxlen=0)
+            case "format":
+                parse = pipeline(parse, make_formatter_from_args(args))
+                tokens = parse_file(args.file, parse)
+                writer(tokens, sys.stdout)
+
     except TokenError as e:
         traceback.print_exception(e, limit=0)
         return 1
