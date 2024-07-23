@@ -272,7 +272,11 @@ def lexer(file: TextIO, filename: str | None = None) -> Iterator[Token]:
             repeat = False
 
             for match in TokenTag.finditer(line):
-                token = Token.from_match(match, filename=filename)
+                token = Token.from_match(
+                    match,
+                    filename=filename,
+                    lineno=lineno,
+                )
 
                 token.prev = prev
                 if prev is not None:
