@@ -103,6 +103,7 @@ class TokenFields(TypedDict, total=False):
     line: str
     lineno: int
     start: int
+    data_start: int
     end: int
     prev: Token | None
     next: Token | None
@@ -118,6 +119,7 @@ class Token:
     line: str = None  # type: ignore[assignment]
     lineno: int = 0
     start: int = 0
+    data_start: int = 0
     end: int = None  # type: ignore[assignment]
     prev: Token | None = None
     next: Token | None = None
@@ -165,12 +167,13 @@ class Token:
             start = index if index >= 0 else len(self.data) + index
             end = start + 1
 
-        start += self.start
-        end += self.start
+        start += self.data_start
+        end += self.data_start
 
         return self.clone(
             data=self.data[index],
             start=start,
+            data_start=start,
             end=end,
         )
 
@@ -203,6 +206,7 @@ class Token:
         kwargs.setdefault("tag", tag)
         kwargs.setdefault("line", match.string)
         kwargs.setdefault("start", match.start())
+        kwargs.setdefault("data_start", match.start(tag))
         kwargs.setdefault("end", match.end())
 
         return cls(**kwargs)
