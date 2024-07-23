@@ -3,18 +3,38 @@ from __future__ import annotations
 import argparse
 import collections
 import dataclasses
+import decimal
 import enum
 import functools
+import io
+import itertools
 import math
+import operator
 import re
 import sys
 import traceback
 import typing
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    MutableMapping,
+    Sequence,
+)
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Self, TextIO, TypedDict, Union, Unpack
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Iterator
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Self,
+    TextIO,
+    TypedDict,
+    Union,
+    Unpack,
+    cast,
+    overload,
+)
 
 
 class AutoEnum(enum.IntEnum):
@@ -157,10 +177,10 @@ class Token:
     def __repr__(self) -> str:
         return repr(str(self))
 
-    def clone(self, **kwargs: Unpack[TokenFields]) -> Token:
+    def clone(self, **kwargs: Unpack[TokenFields]) -> Self:
         return dataclasses.replace(self, **kwargs)
 
-    def __getitem__(self, index: int | slice) -> Token:
+    def __getitem__(self, index: int | slice) -> Self:
         if isinstance(index, slice):
             start, end, _ = index.indices(len(self.data))
         else:
@@ -194,7 +214,7 @@ class Token:
         cls,
         match: re.Match[str],
         **kwargs: Unpack[TokenFields],
-    ) -> Token:
+    ) -> Self:
         lastgroup = match.lastgroup
         if lastgroup is None:
             errmsg = "match not did not capture any groups"
@@ -694,6 +714,673 @@ def autoquote(regex: str = "", *, preserve: bool = False) -> ParserDecorator:
     return autoquote
 
 
+class KeyValuesPreprocessorError(TokenError):
+    pass
+
+
+def read_balanced(tokens: Iterable[Token], depth: int = 0) -> Iterable[Token]:
+    # Yield leading whitespace and comments.
+    nonspace = yield from yieldspace(tokens, depth)
+
+    for token in itertools.chain([nonspace], tokens):
+        token.depth = depth
+
+        match token.tag:
+            case TokenTag.EOF:
+                errmsg = "missing }"
+                raise KeyValuesPreprocessorError(errmsg, token)
+
+            case TokenTag.PLAIN:
+                match token.data:
+                    case "{":
+                        depth += 1
+                    case "}":
+                        depth -= 1
+                        # Braces are not considered to be inside their section.
+                        token.depth = depth
+
+        yield token
+
+        if depth == 0:
+            break
+
+
+def read_directive(tokens: Iterable[Token]) -> Iterator[Token | list[Token]]:
+    # No space in topmost section.
+    for token in skipspace(tokens):
+        match token.tag:
+            case TokenTag.EOF:
+                errmsg = "unclosed directive"
+                raise KeyValuesPreprocessorError(errmsg, token)
+
+            case TokenTag.PLAIN:
+                match token.data:
+                    case "{":
+                        # Capture space an nested sections.
+                        yield [token, *read_balanced(tokens, depth=1)]
+                        continue
+
+                    case "}":
+                        yield token
+                        break
+
+        yield token
+
+
+def yield_directive(*tokens: Token) -> Iterator[Token]:
+    yield Token("{", tag=TokenTag.PLAIN)
+    yield from tokens
+    yield Token("}", tag=TokenTag.PLAIN)
+
+
+@dataclass
+class Definition:
+    params: list[Token]
+    content: list[Token]
+    arity: int = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        self.arity = len(self.params)
+
+
+@dataclass(slots=True)
+class Directive:
+    begin: Token
+    content: list[Token | list[Token]]
+    end: Token
+
+    @overload
+    def __getitem__(self, index: int) -> Token | list[Token]: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[Token | list[Token]]: ...
+
+    def __getitem__(self, index: int | slice) -> Any:
+        return self.content[index]
+
+    def __len__(self) -> int:
+        return len(self.content)
+
+    @classmethod
+    def read(cls, first: Token, tokens: Iterable[Token]) -> Self:
+        content: list[Token | list[Token]] = []
+
+        for token in skipspace(tokens):
+            match token.tag:
+                case TokenTag.EOF:
+                    errmsg = "unclosed directive"
+                    raise KeyValuesPreprocessorError(errmsg, token)
+
+                case TokenTag.PLAIN:
+                    match token.data:
+                        case "{":
+                            # Capture space an nested sections.
+                            content.append(
+                                [token, *read_balanced(tokens, depth=1)]
+                            )
+                            continue
+
+                        case "}":
+                            end = token
+                            break
+
+            content.append(token)
+
+        if not content:
+            errmsg = "empty directive"
+            raise KeyValuesPreprocessorError(errmsg, end)
+
+        return cls(first, content, end)
+
+
+if TYPE_CHECKING:
+    R = typing.TypeVar("R")
+    P = typing.ParamSpec("P")
+
+
+class preprocessor:  # noqa: N801
+    def __init__(self, parser: Parser):
+        functools.update_wrapper(self, parser)
+        self.parser = parser
+        self.globals: dict[str, Definition] = {}
+        self.locals = collections.ChainMap(self.globals)
+
+    def __call__(self, tokens: Iterable[Token], depth: int) -> Iterator[Token]:
+        repeat = True
+        while repeat:
+            repeat = False
+            expand = False
+
+            for token in self.parser(tokens, depth):
+                depth = token.depth
+
+                match token.role:
+                    case TokenRole.OPEN:
+                        self.enter_scope()
+
+                    case TokenRole.CLOSE:
+                        self.exit_scope()
+
+                    case TokenRole.KEY:
+                        expect_modifier = True
+
+                        if token.tag is TokenTag.PLAIN and token.data == "{":
+                            # Directive is read from the unparsed token stream.
+                            directive = Directive.read(token, tokens)
+                            expanded = self.expand_directive(directive, tokens)
+
+                            # Prepend expanded directive and restart the parser.
+                            tokens = itertools.chain(expanded, tokens)
+                            repeat = True
+                            break
+
+                    case TokenRole.VALUE:
+                        expect_modifier = False
+
+                        if expand:
+                            token = expand_expressions(
+                                token, self.evaluate_definition
+                            )
+
+                        expand = False
+
+                    case TokenRole.CONDITION if expect_modifier:
+                        expect_modifier = False
+
+                        match token.data:
+                            case "$[]":
+                                expand = True
+                                continue
+                            case _:
+                                expand = False
+
+                yield token
+
+    def expand_directive(
+        self,
+        directive: Directive,
+        tokens: Iterable[Token],
+    ) -> Iterator[Token]:
+        first = directive[0]
+        if isinstance(first, list):
+            errmsg = "invalid directive name"
+            raise KeyValuesPreprocessorError(errmsg, first[0])
+
+        match first.data.upper():
+            case "COMMENT":
+                pass
+
+            case "BEGIN":
+                self.enter_scope()
+
+            case "END":
+                self.exit_scope()
+
+            case "LOCAL":
+                self.store_definition(directive, tokens, self.locals)
+
+            case "GLOBAL":
+                self.store_definition(directive, tokens, self.globals)
+
+            case "INCLUDE":
+                if len(directive) < 1:
+                    errmsg = "missing function name"
+                    raise KeyValuesPreprocessorError(errmsg, directive.end)
+
+                name = directive[1]
+                if isinstance(name, list):
+                    errmsg = "invalid function name"
+                    raise KeyValuesPreprocessorError(errmsg, name[0])
+
+                arguments = directive[2:]
+                yield from self.expand_definition(name, arguments, 1)
+
+            case _:
+                errmsg = f'invalid directive "{first.data}"'
+                raise KeyValuesPreprocessorError(errmsg, first)
+
+    def enter_scope(self) -> None:
+        self.locals = self.locals.new_child()
+
+    def exit_scope(self) -> None:
+        self.locals = self.locals.parents
+
+    def store_definition(
+        self,
+        directive: Directive,
+        tokens: Iterable[Token],
+        dest: MutableMapping[str, Definition],
+    ) -> None:
+        if len(directive) < 2:
+            errmsg = "missing function name"
+            raise KeyValuesPreprocessorError(errmsg, directive.end)
+
+        name = directive[1]
+        if isinstance(name, list):
+            errmsg = "invalid function name"
+            raise KeyValuesPreprocessorError(errmsg, name[0])
+
+        params = directive[2:]
+        for param in params:
+            if isinstance(param, list):
+                errmsg = "invalid function parameter"
+                raise KeyValuesPreprocessorError(errmsg, param[0])
+
+        params = cast(list[Token], params)
+
+        content = [name.clone(depth=0)]
+        # Read next condition (optional) and value (or section).
+        content.extend(read_balanced(tokens))
+        if is_condition(content[-1]):
+            content.extend(read_balanced(tokens))
+
+        dest[name.data] = Definition(params, content)
+
+    def expand_definition(
+        self,
+        name: Token,
+        arguments: Sequence[Token | Sequence[Token]],
+        min_depth: int = 0,
+    ) -> Iterator[Token]:
+        definition = self.locals.get(name.data)
+        if definition is None:
+            errmsg = f'function "{name.data}" not found'
+            raise KeyValuesPreprocessorError(errmsg, name)
+
+        if len(arguments) != definition.arity:
+            errmsg = (
+                f'function "{name.data}" takes {definition.arity}'
+                f" arguments, but {len(arguments)} were given"
+            )
+            e = KeyValuesPreprocessorError(errmsg, name)
+
+            if arguments:
+                e.add_note("Function was called with the following arguments:")
+                for i, argument in enumerate(arguments, 1):
+                    note = io.StringIO()
+                    note.write(f"[{i}] ")
+                    if isinstance(argument, Token):
+                        note.write(str(argument))
+                    else:
+                        writer(argument, note)
+                    e.add_note(note.getvalue())
+
+            raise e
+
+        # Create a new scope for the expanded function.
+        yield from yield_directive(Token("BEGIN", tag=TokenTag.PLAIN))
+
+        # Define a nullary local function for each passed argument.
+        for param, arg in zip(definition.params, arguments):
+            yield from yield_directive(
+                Token("LOCAL", tag=TokenTag.PLAIN),
+                Token(" ", tag=TokenTag.SPACE),
+                param,
+            )
+            if isinstance(arg, Token):
+                yield arg
+            else:
+                yield from arg
+
+        # Yield only tokens inside a section.
+        for token in definition.content:
+            if token.depth >= min_depth:
+                yield token
+
+        # Close the scope created for the expanded function.
+        yield from yield_directive(Token("END", tag=TokenTag.PLAIN))
+
+    def evaluate_definition(
+        self,
+        name: Token,
+        arguments: Sequence[Token],
+    ) -> Token:
+        tokens = self.expand_definition(name, arguments, 0)
+
+        for token in self(tokens, 0):
+            if token.role is TokenRole.VALUE:
+                return token
+
+        errmsg = "function did not produce any value"
+        raise KeyValuesPreprocessorError(errmsg, name)
+
+
+class ExpressionTag(RegexEnum):
+    # fmt: off
+    AND    = r"&&"
+    OR     = r"\|\|"
+
+    EQ     = r"=="
+    NE     = r"!="
+    NOT    = r"!"
+
+    GE     = r">="
+    GT     = r">"
+    LE     = r"<="
+    LT     = r"<"
+
+    PLUS   = r"\+"
+    MINUS  = r"-"
+    MULT   = r"\*"
+    DIVIDE = r"/"
+    MODULO = r"%"
+    POWER  = r"\^"
+
+    EXPAND = r"\$"
+
+    OPEN   = r"\("
+    CLOSE  = r"\)"
+
+    NUMBER = r"[+-]?(?:\.\d+|\d+(?:\.\d*)?)"
+    NAME   = r"[^\W\d][\w]*"
+
+    SPACE  = r"\s+"
+    ERROR  = r"."
+    EOF    = r"$"
+    # fmt: on
+
+
+if TYPE_CHECKING:
+
+    class ExpressionToken(Token):
+        tag: ExpressionTag  # type: ignore[assignment]
+
+else:
+    ExpressionToken = Token
+
+
+class KeyValuesExpressionError(TokenError):
+    pass
+
+
+def tokenize_expression(expression: Token) -> Iterator[ExpressionToken]:
+    for match in ExpressionTag.finditer(expression.data):
+        assert match.lastgroup is not None
+        tag = ExpressionTag[match.lastgroup]
+
+        if tag is ExpressionTag.SPACE:
+            continue
+
+        token = cast(ExpressionToken, expression[match.start() : match.end()])
+        token.tag = tag
+
+        if tag is ExpressionTag.ERROR:
+            errmsg = f'unexpected character "{token.data}" in expression'
+            raise KeyValuesExpressionError(errmsg, token)
+
+        yield token
+
+
+def tokenize_arguments(expression: Token) -> Iterator[ExpressionToken]:
+    tokens = tokenize_expression(expression)
+
+    for token in tokens:
+        match token.tag:
+            case ExpressionTag.EOF:
+                return
+
+            case ExpressionTag.PLUS | ExpressionTag.MINUS:
+                # Join sign and number into a single token.
+                number = next(tokens)
+
+                if number.tag is not ExpressionTag.NUMBER:
+                    break
+
+                number.data = token.data + number.data
+                yield number
+
+            case ExpressionTag.NUMBER | ExpressionTag.NAME:
+                yield token
+
+            case _:
+                break
+
+    errmsg = f'invalid subtoken "{token.data}" in expanded token'
+    raise KeyValuesExpressionError(errmsg, token)
+
+
+def to_decimal(token: ExpressionToken) -> decimal.Decimal:
+    if token.tag is ExpressionTag.NUMBER:
+        return decimal.Decimal(token.data)
+
+    errmsg = f'"{token}" cannot be converted to a number'
+    raise KeyValuesExpressionError(errmsg, token)
+
+
+class Operator:
+    def __init__(self, op: Callable[..., Any], bp: int, *, infixl: bool = True):
+        self.op = op
+        self.lbp = bp * 2 + (1 - infixl)
+        self.rbp = bp * 2
+
+    def invoke(
+        self,
+        token: ExpressionToken,
+        *args: ExpressionToken,
+    ) -> ExpressionToken:
+        value = self.op(*map(to_decimal, args))
+        if not isinstance(value, decimal.Decimal):
+            value = decimal.Decimal(value)
+
+        token = token.clone(data=format(value, "f"))
+        token.tag = ExpressionTag.NUMBER
+        return token
+
+
+PREFIX_OPERATORS = {
+    ExpressionTag.PLUS: Operator(operator.pos, 9),
+    ExpressionTag.MINUS: Operator(operator.neg, 9),
+    ExpressionTag.NOT: Operator(operator.not_, 9),
+}
+
+INFIX_OPERATORS = {
+    ExpressionTag.AND: Operator(lambda x, y: x and y, 0),
+    ExpressionTag.OR: Operator(lambda x, y: x or y, 1),
+    ExpressionTag.EQ: Operator(operator.eq, 2),
+    ExpressionTag.NE: Operator(operator.ne, 2),
+    ExpressionTag.LE: Operator(operator.le, 3),
+    ExpressionTag.LT: Operator(operator.lt, 3),
+    ExpressionTag.GE: Operator(operator.ge, 3),
+    ExpressionTag.GT: Operator(operator.gt, 3),
+    ExpressionTag.PLUS: Operator(operator.add, 4),
+    ExpressionTag.MINUS: Operator(operator.sub, 4),
+    ExpressionTag.MULT: Operator(operator.mul, 5),
+    ExpressionTag.DIVIDE: Operator(operator.truediv, 5),
+    ExpressionTag.MODULO: Operator(operator.mod, 5),
+    ExpressionTag.POWER: Operator(operator.pow, 6, infixl=False),
+}
+
+
+T = typing.TypeVar("T")
+
+
+class Peekable(Generic[T], Iterator[T]):
+    def __init__(self, iterable: Iterable[T]):
+        self._it = iter(iterable)
+        self._next = collections.deque[T]()
+
+    def __iter__(self) -> Self:
+        return self
+
+    def __next__(self) -> T:
+        return self._next.popleft() if self._next else next(self._it)
+
+    def __getitem__(self, index: int) -> T:
+        if index < 0:
+            errmsg = "negative index"
+            raise ValueError(errmsg)
+
+        self._load(index + 1)
+        return self._next[index]
+
+    def get(self, index: int, default: T | None = None) -> T | None:
+        try:
+            return self[index]
+        except IndexError:
+            return default
+
+    def skip(self, count: int) -> None:
+        next(itertools.islice(self, count, count), None)
+
+    def _load(self, count: int) -> None:
+        loaded = len(self._next)
+        if count > loaded:
+            self._next.extend(itertools.islice(self._it, count - loaded))
+
+
+def pratt(
+    tokens: Peekable[ExpressionToken],
+    expander: Callable[[Token, Sequence[Token]], Token],
+    min_bp: int = 0,
+    *,
+    take_one: bool = False,
+    stop_on_expand: bool = False,
+) -> ExpressionToken:
+    recurse = functools.partial(pratt, tokens, expander)
+
+    token = next(tokens)
+
+    match token.tag:
+        case ExpressionTag.NUMBER:
+            lhs = token
+
+        case ExpressionTag.OPEN:
+            lhs = recurse(0)
+            if next(tokens).tag is not ExpressionTag.CLOSE:
+                errmsg = "unclosed ("
+                raise KeyValuesExpressionError(errmsg, token)
+
+        # Parse prefix operators (including function calls).
+
+        case ExpressionTag.NAME:
+            arguments = []
+            while True:
+                match tokens[0].tag:
+                    case ExpressionTag.OPEN:
+                        arguments.append(recurse(0, take_one=True))
+
+                    case ExpressionTag.NUMBER | ExpressionTag.NAME:
+                        arguments.append(next(tokens))
+
+                    case ExpressionTag.EXPAND if not stop_on_expand:
+                        next(tokens)
+                        value = recurse(0, take_one=True, stop_on_expand=True)
+                        arguments.extend(tokenize_arguments(value))
+
+                    case _:
+                        break
+
+            lhs = expander(token, arguments)  # type: ignore[assignment]
+
+            # Set correct tag.
+            if match := ExpressionTag.fullmatch(lhs.data):
+                assert match.lastgroup is not None
+                lhs.tag = ExpressionTag[match.lastgroup]
+
+        case _:
+            op = PREFIX_OPERATORS.get(token.tag)
+            if op is None:
+                errmsg = f'unexpected token "{token.data}" in expression'
+                raise KeyValuesExpressionError(errmsg, token)
+
+            rhs = recurse(op.rbp)
+            lhs = op.invoke(token, rhs)
+
+    if take_one:
+        return lhs
+
+    while True:
+        token = tokens[0]
+
+        match token.tag:
+            case ExpressionTag.EOF:
+                break
+
+            case ExpressionTag.CLOSE:
+                break
+
+            # Parse infix operators.
+
+            case _:
+                op = INFIX_OPERATORS.get(token.tag)
+                if op is None:
+                    errmsg = f'expected operator, got "{token}"'
+                    raise KeyValuesExpressionError(errmsg, token)
+
+                if op.lbp <= min_bp:
+                    break
+
+                next(tokens)
+
+                rhs = recurse(op.rbp)
+                lhs = op.invoke(token, lhs, rhs)
+
+    return lhs
+
+
+def evaluate_expression(
+    expression: Token,
+    expander: Callable[[Token, Sequence[Token]], Token],
+) -> Token:
+    try:
+        result = pratt(Peekable(tokenize_expression(expression)), expander)
+    except TokenError as e:
+        errmsg = "error while evaluating expression"
+        raise KeyValuesPreprocessorError(errmsg, expression) from e
+
+    return result.clone(tag=TokenTag.QUOTED)
+
+
+def expand_expressions(
+    token: Token,
+    expander: Callable[[Token, Sequence[Token]], Token],
+) -> Token:
+    parts = []
+
+    cursor = 0
+    start = 0
+    depth = 0
+
+    pattern = re.compile(r"[()]|\$(?:\$|(?=\(|\w))")
+    while match := pattern.search(token.data, cursor):
+        cursor = match.end()
+
+        match match[0]:
+            case "$$" if depth == 0:
+                parts.append(token.data[start : cursor - 1])
+                start = cursor
+                continue
+
+            case "$" if depth == 0:
+                parts.append(token.data[start : cursor - 1])
+                start = cursor
+
+                if token.data[cursor] == "(":
+                    depth = 1
+                    cursor += 1
+                elif nonword := re.search(r"\W", token.data, cursor):
+                    cursor = nonword.start()
+                else:
+                    cursor = len(token.data)
+
+            case "(" if depth > 0:
+                depth += 1
+
+            case ")" if depth > 0:
+                depth -= 1
+
+            case _:
+                continue
+
+        if depth == 0:
+            expression = token[start:cursor]
+            parts.append(evaluate_expression(expression, expander).data)
+            start = cursor
+
+    parts.append(token.data[start:])
+    return token.clone(data="".join(parts), tag=TokenTag.QUOTED)
+
+
 def pipeline(parser: Parser, *decorators: Callable[[Parser], Parser]) -> Parser:
     """Apply `decorators` on `parser`."""
     return functools.reduce(
@@ -704,7 +1391,6 @@ def pipeline(parser: Parser, *decorators: Callable[[Parser], Parser]) -> Parser:
 
 
 if TYPE_CHECKING:
-    T = typing.TypeVar("T")
     Key = Token
     Condition = Token | None
     Value = Union[Token, T]
@@ -872,10 +1558,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         parents=[file_parser, format_parser],
     )
 
+    subparsers.add_parser(
+        "expand",
+        help="expand KeyValues directives and expressions",
+        description=(
+            "Expands directives and expressions in the input file and prints"
+            " the expanded output to stdout."
+        ),
+        parents=[file_parser, format_parser],
+    )
+
     return parser
 
 
-def make_parser_from_args(parser: Parser, args: argparse.Namespace) -> Parser:
+def add_format_parsers(parser: Parser, args: argparse.Namespace) -> Parser:
     if args.quote:
         parser = autoquote(args.quote.pattern)(parser)
 
@@ -907,7 +1603,17 @@ def main() -> int:
                     tokens = parse_file(file, parse)
                     collections.deque(tokens, maxlen=0)
             case "format":
-                parse = make_parser_from_args(parse, args)
+                parse = add_format_parsers(parse, args)
+                tokens = parse_file(args.file, parse)
+                writer(tokens, sys.stdout)
+            case "expand":
+                parse = pipeline(
+                    parser,
+                    preprocessor,
+                    report_errors(treat_empty_root_key_as_error=False),
+                    parse_macros("#base", "#include"),
+                )
+                parse = add_format_parsers(parse, args)
                 tokens = parse_file(args.file, parse)
                 writer(tokens, sys.stdout)
 

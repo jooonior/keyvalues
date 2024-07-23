@@ -22,6 +22,7 @@ ignore = [
     "D203",     # blank line required before class docstring
     "ISC",      # implicit string concatenation
     "PLR09",    # too many arguments, statements, branches, etc.
+    "PLR2004",  # magic value used in comparison
     "PLW2901",  # assigning to loop variable
     "Q",        # quotes
     "S101",     # assert not allowed
