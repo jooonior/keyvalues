@@ -114,9 +114,14 @@ class TokenRole(AutoEnum):
     CLOSE = ()
 
 
+class TokenFlags(enum.IntFlag):
+    OVERRIDE = enum.auto()
+
+
 class TokenFields(TypedDict, total=False):
     data: str
     tag: TokenTag
+    flags: TokenFlags
     depth: int
     role: TokenRole | None
     filename: str | None
@@ -133,6 +138,7 @@ class TokenFields(TypedDict, total=False):
 class Token:
     data: str
     tag: TokenTag = None  # type: ignore[assignment]
+    flags: TokenFlags = TokenFlags(0)  # noqa: RUF009
     depth: int = -1
     role: TokenRole | None = None
     filename: str | None = None
@@ -176,6 +182,9 @@ class Token:
 
     def __repr__(self) -> str:
         return repr(str(self))
+
+    def __hash__(self) -> int:
+        return hash(self.data)
 
     def clone(self, **kwargs: Unpack[TokenFields]) -> Self:
         return dataclasses.replace(self, **kwargs)
@@ -356,7 +365,7 @@ def skipspace(tokens: Iterable[Token]) -> Iterator[Token]:
 
 def yieldspace(
     tokens: Iterable[Token],
-    depth: int,
+    depth: int | None = None,
 ) -> Generator[Token, None, Token]:
     """Read until the first `Token` that is not whitespace nor a comment.
 
@@ -365,7 +374,8 @@ def yieldspace(
     """
     for token in tokens:
         if isspace(token):
-            token.depth = depth
+            if depth is not None:
+                token.depth = depth
             yield token
         else:
             return token
@@ -850,6 +860,7 @@ class preprocessor:  # noqa: N801
         while repeat:
             repeat = False
             expand = False
+            last_key: Token | None = None
 
             for token in self.parser(tokens, depth):
                 depth = token.depth
@@ -862,6 +873,7 @@ class preprocessor:  # noqa: N801
                         self.exit_scope()
 
                     case TokenRole.KEY:
+                        last_key = token
                         expect_modifier = True
 
                         if token.tag is TokenTag.PLAIN and token.data == "{":
@@ -887,12 +899,22 @@ class preprocessor:  # noqa: N801
                     case TokenRole.CONDITION if expect_modifier:
                         expect_modifier = False
 
-                        match token.data:
-                            case "$[]":
-                                expand = True
-                                continue
-                            case _:
-                                expand = False
+                        match = re.fullmatch(r"\$\[(.*)\]", token.data)
+                        if match is not None:
+                            expand = True
+
+                            for flag in match[1].split():
+                                flag = flag.upper()
+                                if flag == "NOEXPAND":
+                                    expand = False
+                                else:
+                                    assert last_key is not None
+                                    last_key.flags |= TokenFlags[flag]
+
+                            continue
+
+                        else:
+                            expand = False
 
                 yield token
 
@@ -1400,6 +1422,8 @@ if TYPE_CHECKING:
 def loader(
     tokens: Iterable[Token],
     factory: Callable[[Iterable[KeyValueTuple[T]]], T],
+    *,
+    pass_braces: bool = False,
 ) -> T:
     """Build a recursive tree from a parsed tokens.
 
@@ -1411,13 +1435,15 @@ def loader(
     `Token.role` set, except for the last one which represents EOF. Unexpected
     tokens are treated as EOF (error reporting is to be done by the parser).
     """
-    return factory(_loader(tokens, factory))
+    return factory(_loader(tokens, factory, pass_braces=pass_braces))  # type: ignore[arg-type]
 
 
 def _loader(
     tokens: Iterable[Token],
-    factory: Callable[[Iterable[KeyValueTuple[T]]], T],
-) -> Iterator[KeyValueTuple[T]]:
+    factory: Callable[[Iterable[KeyValueTuple[T] | Token]], T],
+    *,
+    pass_braces: bool = False,
+) -> Iterator[KeyValueTuple[T] | Token]:
     tokens = skipspace(tokens)
     key = next(tokens)
 
@@ -1432,8 +1458,12 @@ def _loader(
 
         match value.role:
             case TokenRole.OPEN:
-                section = loader(tokens, factory)
-                yield (key, condition), section
+                section = _loader(tokens, factory, pass_braces=pass_braces)
+
+                if pass_braces:
+                    section = itertools.chain([value], section)
+
+                yield (key, condition), factory(section)
 
                 # The recursive call might have read the EOF token.
                 nextkey = next(tokens, None)
@@ -1453,6 +1483,132 @@ def _loader(
                 break
 
         key = nextkey
+
+    if pass_braces and key.role is TokenRole.CLOSE:
+        yield key
+
+
+@dataclass(slots=True)
+class KeyConditionValue(Generic[T]):
+    key: Token
+    condition: Token | None
+    value: Token | T
+
+    @classmethod
+    def from_tuple(cls, tuple_: KeyValueTuple[T]) -> Self:
+        (key, condition), value = tuple_
+        return cls(key, condition, value)
+
+
+class MergedKeyValues:
+    def __init__(
+        self,
+        loaded: Iterable[KeyValueTuple[MergedKeyValues] | Token],
+    ):
+        self.items: list[KeyConditionValue[MergedKeyValues]] = []
+        self.index: dict[tuple[str, str | None], int] = {}
+
+        loaded = iter(loaded)
+
+        # Peek first item.
+        first = next(loaded, None)
+        self.open = first if isinstance(first, Token) else None
+        self.close = None
+
+        # Put first item back.
+        if isinstance(first, tuple):
+            loaded = itertools.chain([first], loaded)
+
+        for item in loaded:
+            if isinstance(item, Token):
+                self.close = item
+                break
+
+            self.append(KeyConditionValue.from_tuple(item))
+
+    def append(self, item: KeyConditionValue[MergedKeyValues]) -> None:
+        key = item.key
+        condition = item.condition
+        value = item.value
+
+        index_key = (
+            key.data,
+            None if condition is None else condition.data,
+        )
+
+        if TokenFlags.OVERRIDE in key.flags:
+            i = self.index.get(index_key)
+            if i is not None:
+                old = self.items[i]
+
+                if isinstance(old.value, MergedKeyValues) and isinstance(
+                    value, MergedKeyValues
+                ):
+                    old.value.merge(value)
+                else:
+                    self.items[i].value = value
+
+                return
+
+        self.index[index_key] = len(self.items)
+        self.items.append(item)
+
+    def merge(self, other: MergedKeyValues) -> None:
+        for item in other.items:
+            self.append(item)
+
+    def __iter__(self) -> Iterator[Token]:
+        def yield_token(token: Token) -> Iterator[Token]:
+            yield token
+            yield from yieldspace(token.inext())
+
+        if self.open is not None:
+            yield from yield_token(self.open)
+
+        for item in self.items:
+            yield from yield_token(item.key)
+
+            if isinstance(item.value, MergedKeyValues):
+                yield from item.value
+            else:
+                yield from yield_token(item.value)
+
+            if item.condition is not None:
+                yield from yield_token(item.condition)
+
+        if self.close is not None:
+            yield from yield_token(self.close)
+
+
+def chain(tokens: Iterable[Token]) -> Iterator[Token]:
+    prev: Token | None = None
+
+    for token in tokens:
+        token.prev = prev
+
+        if prev is not None:
+            prev.next = token
+
+        prev = token
+
+        yield token
+
+
+@parser_decorator
+def merge(tokens: Iterable[Token], _depth: int) -> Iterator[Token]:
+    tokens = chain(tokens)
+
+    # Peek first token.
+    tokens = iter(tokens)
+    first = next(tokens)
+    tokens = itertools.chain([first], tokens)
+
+    merged = loader(tokens, MergedKeyValues, pass_braces=True)
+
+    yield first
+    yield from yieldspace(first.inext())
+
+    yield from merged
 
 
 def writer(tokens: Iterable[Token], file: TextIO) -> None:
@@ -1612,6 +1768,7 @@ def main() -> int:
                     preprocessor,
                     report_errors(treat_empty_root_key_as_error=False),
                     parse_macros("#base", "#include"),
+                    merge,
                 )
                 parse = add_format_parsers(parse, args)
                 tokens = parse_file(args.file, parse)
