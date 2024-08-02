@@ -5,11 +5,12 @@ warn_unreachable = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = "test_keyvalues"
+module = "tests.*"
 disable_error_code = ["no-untyped-call", "no-untyped-def"]
 
 [tool.ruff]
 line-length = 80
+src=["src"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -32,7 +33,6 @@ ignore = [
 mypy-init-return = true
 
 [tool.ruff.lint.per-file-ignores]
-"test_*" = [
-    "INP001",    # implicit namespace package (no `__init__.py`)
+"tests/*" = [
     "ANN",       # missing annotations
 ]
