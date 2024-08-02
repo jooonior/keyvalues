@@ -1001,6 +1001,8 @@ def merge(tokens: Iterable[Token], _depth: int) -> Iterator[Token]:
     merged = loader(tokens, MergedKeyValues, pass_braces=True)
 
     yield first
-    yield from yieldspace(first.inext())
+
+    if first.tag is not TokenTag.EOF:
+        yield from yieldspace(first.inext())
 
     yield from merged
