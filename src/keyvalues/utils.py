@@ -46,14 +46,20 @@ class RegexEnum(enum.IntEnum, metaclass=RegexEnumMeta):
 
     pattern: str
 
-    def __new__(cls, value: str) -> Self:
-        index = len(cls) + 1
+    if TYPE_CHECKING:
+        # Type checker thinks that __new__ is used to lookup members.
+        def __new__(cls, value: int) -> Self: ...
 
-        obj = int.__new__(cls, index)
-        obj._value_ = index
-        obj.pattern = value
+    else:
 
-        return obj
+        def __new__(cls, value: str) -> Self:
+            index = len(cls) + 1
+
+            obj = int.__new__(cls, index)
+            obj._value_ = index
+            obj.pattern = value
+
+            return obj
 
     def __init_subclass__(cls) -> None:
         for member in cls:

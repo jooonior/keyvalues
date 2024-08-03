@@ -37,16 +37,12 @@ class TokenRole(utils.AutoIntEnum):
     CLOSE = ()
 
 
-class TokenFlags(utils.AutoFlagEnum):
-    OVERRIDE = ()
-
-
 class TokenFields(TypedDict, total=False):
     data: str
-    tag: TokenTag
-    flags: TokenFlags
+    tag: int
+    flags: int
     depth: int
-    role: TokenRole | None
+    role: int | None
     filename: str | None
     line: str
     lineno: int
@@ -60,10 +56,10 @@ class TokenFields(TypedDict, total=False):
 @dataclass(slots=True)
 class Token:
     data: str
-    tag: TokenTag = None  # type: ignore[assignment]
-    flags: TokenFlags = TokenFlags(0)  # noqa: RUF009
+    tag: int = None  # type: ignore[assignment]
+    flags: int = 0
     depth: int = -1
-    role: TokenRole | None = None
+    role: int | None = None
     filename: str | None = None
     line: str = None  # type: ignore[assignment]
     lineno: int = 0

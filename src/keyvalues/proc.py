@@ -32,7 +32,6 @@ from .fmt import writer
 from .parse import (
     Token,
     TokenError,
-    TokenFlags,
     TokenRole,
     TokenTag,
     is_condition,
@@ -166,12 +165,11 @@ class Directive:
 
 
 if TYPE_CHECKING:
-    R = typing.TypeVar("R")
-    P = typing.ParamSpec("P")
     LookupMap = dict[str, Token | LookupMap]  # noqa: F821
 
 
-T = typing.TypeVar("T")
+class TokenFlags(utils.AutoFlagEnum):
+    OVERRIDE = ()
 
 
 class expand:  # noqa: N801
@@ -493,20 +491,11 @@ class ExpressionTag(utils.RegexEnum):
     # fmt: on
 
 
-if TYPE_CHECKING:
-
-    class ExpressionToken(Token):
-        tag: ExpressionTag  # type: ignore[assignment]
-
-else:
-    ExpressionToken = Token
-
-
 class KeyValuesExpressionError(TokenError):
     pass
 
 
-def tokenize_expression(expression: Token) -> Iterator[ExpressionToken]:
+def tokenize_expression(expression: Token) -> Iterator[Token]:
     for match in ExpressionTag.finditer(expression.data):
         assert match.lastgroup is not None
         tag = ExpressionTag[match.lastgroup]
@@ -514,7 +503,7 @@ def tokenize_expression(expression: Token) -> Iterator[ExpressionToken]:
         if tag is ExpressionTag.SPACE:
             continue
 
-        token = cast(ExpressionToken, expression[match.start() : match.end()])
+        token = expression[match.start() : match.end()]
         token.tag = tag
 
         if tag is ExpressionTag.ERROR:
@@ -524,7 +513,7 @@ def tokenize_expression(expression: Token) -> Iterator[ExpressionToken]:
         yield token
 
 
-def tokenize_arguments(expression: Token) -> Iterator[ExpressionToken]:
+def tokenize_arguments(expression: Token) -> Iterator[Token]:
     tokens = tokenize_expression(expression)
 
     for token in tokens:
@@ -552,7 +541,7 @@ def tokenize_arguments(expression: Token) -> Iterator[ExpressionToken]:
     raise KeyValuesExpressionError(errmsg, token)
 
 
-def to_decimal(token: ExpressionToken) -> decimal.Decimal:
+def to_decimal(token: Token) -> decimal.Decimal:
     if token.tag is ExpressionTag.NUMBER:
         return decimal.Decimal(token.data)
 
@@ -566,11 +555,7 @@ class Operator:
         self.lbp = bp * 2 + (1 - infixl)
         self.rbp = bp * 2
 
-    def invoke(
-        self,
-        token: ExpressionToken,
-        *args: ExpressionToken,
-    ) -> ExpressionToken:
+    def invoke(self, token: Token, *args: Token) -> Token:
         value = self.op(*map(to_decimal, args))
         if not isinstance(value, decimal.Decimal):
             value = decimal.Decimal(value)
@@ -602,6 +587,9 @@ INFIX_OPERATORS = {
     ExpressionTag.MODULO: Operator(operator.mod, 5),
     ExpressionTag.POWER: Operator(operator.pow, 6, infixl=False),
 }
+
+
+T = typing.TypeVar("T")
 
 
 class Peekable(Generic[T], Iterator[T]):
@@ -639,13 +627,13 @@ class Peekable(Generic[T], Iterator[T]):
 
 
 def pratt(
-    tokens: Peekable[ExpressionToken],
-    expander: Callable[[Token, Sequence[Token] | None], ExpressionToken],
+    tokens: Peekable[Token],
+    expander: Callable[[Token, Sequence[Token] | None], Token],
     min_bp: int = 0,
     *,
     take_one: bool = False,
     stop_on_expand: bool = False,
-) -> ExpressionToken:
+) -> Token:
     recurse = functools.partial(pratt, tokens, expander)
 
     token = next(tokens)
@@ -690,7 +678,7 @@ def pratt(
             lhs = expander(token, None)
 
         case _:
-            op = PREFIX_OPERATORS.get(token.tag)
+            op = PREFIX_OPERATORS.get(ExpressionTag(token.tag))
             if op is None:
                 errmsg = f'unexpected token "{token.data}" in expression'
                 raise KeyValuesExpressionError(errmsg, token)
@@ -714,7 +702,7 @@ def pratt(
             # Parse infix operators.
 
             case _:
-                op = INFIX_OPERATORS.get(token.tag)
+                op = INFIX_OPERATORS.get(ExpressionTag(token.tag))
                 if op is None:
                     errmsg = f'expected operator, got "{token}"'
                     raise KeyValuesExpressionError(errmsg, token)
@@ -734,11 +722,8 @@ def evaluate_expression(
     expression: Token,
     expander: Callable[[Token, Sequence[Token] | None], Token],
 ) -> Token:
-    def expr_expander(
-        name: Token,
-        arguments: Sequence[Token] | None,
-    ) -> ExpressionToken:
-        token: ExpressionToken = expander(name, arguments)  # type: ignore[assignment]
+    def expr_expander(name: Token, arguments: Sequence[Token] | None) -> Token:
+        token = expander(name, arguments)
 
         # Set correct tag.
         match = ExpressionTag.fullmatch(token.data)
@@ -931,7 +916,7 @@ class MergedKeyValues:
             None if condition is None else condition.data,
         )
 
-        if TokenFlags.OVERRIDE in key.flags:
+        if TokenFlags.OVERRIDE & key.flags:
             i = self.index.get(index_key)
             if i is not None:
                 old = self.items[i]
