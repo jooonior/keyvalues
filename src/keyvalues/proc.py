@@ -23,7 +23,6 @@ from typing import (
     Generic,
     Self,
     TypeGuard,
-    Union,
     assert_never,
     overload,
 )
@@ -906,82 +905,6 @@ def expand_expressions(
 
     parts.append(token.data[start:])
     return token.clone(data="".join(parts), tag=TokenTag.QUOTED)
-
-
-if TYPE_CHECKING:
-    Key = Token
-    Condition = Token | None
-    Value = Union[Token, T]
-    KeyValueTuple = tuple[tuple[Key, Condition], Value[T]]
-
-
-def loader(
-    tokens: Iterable[Token],
-    factory: Callable[[Iterable[KeyValueTuple[T]]], T],
-    *,
-    pass_braces: bool = False,
-) -> T:
-    """Build a recursive tree from a parsed tokens.
-
-    Returns an object created by calling `factory` with an iterable of
-    `((key, condition), value)` tuples, where `value` is either a `Token` or
-    another recursively loaded subsection.
-
-    Assumes that each semantically relevant `Token` in `tokens` has its
-    `Token.role` set, except for the last one which represents EOF. Unexpected
-    tokens are treated as EOF (error reporting is to be done by the parser).
-    """
-    return factory(_loader(tokens, factory, pass_braces=pass_braces))  # type: ignore[arg-type]
-
-
-def _loader(
-    tokens: Iterable[Token],
-    factory: Callable[[Iterable[KeyValueTuple[T] | Token]], T],
-    *,
-    pass_braces: bool = False,
-) -> Iterator[KeyValueTuple[T] | Token]:
-    tokens = skipspace(tokens)
-    key = next(tokens)
-
-    while key.role is TokenRole.KEY:
-        value = next(tokens)
-
-        if value.role is TokenRole.CONDITION:
-            condition = value
-            value = next(tokens)
-        else:
-            condition = None
-
-        match value.role:
-            case TokenRole.OPEN:
-                section = _loader(tokens, factory, pass_braces=pass_braces)
-
-                if pass_braces:
-                    section = itertools.chain([value], section)
-
-                yield (key, condition), factory(section)
-
-                # The recursive call might have read the EOF token.
-                nextkey = next(tokens, None)
-                if nextkey is None:
-                    break
-
-            case TokenRole.VALUE:
-                nextkey = next(tokens)
-                if nextkey.role is TokenRole.CONDITION:
-                    condition = nextkey
-                    nextkey = next(tokens)
-
-                yield (key, condition), value
-
-            case _:
-                yield (key, condition), factory([])
-                break
-
-        key = nextkey
-
-    if pass_braces and key.role is TokenRole.CLOSE:
-        yield key
 
 
 @dataclass(slots=True)
