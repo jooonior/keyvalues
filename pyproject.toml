@@ -33,6 +33,9 @@ ignore = [
 mypy-init-return = true
 
 [tool.ruff.lint.per-file-ignores]
+"src/*" = [
+    "PT",        # pytest things
+]
 "tests/*" = [
     "ANN",       # missing annotations
 ]

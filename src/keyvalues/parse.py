@@ -123,7 +123,7 @@ class Token:
         )
 
     def split(self, sep: str) -> Iterator[Token]:
-        for match in re.finditer(rf"[^{sep}]*", self.data):
+        for match in re.finditer(rf"[^{sep}]+", self.data):
             yield self[match.start() : match.end()]
 
     def iprev(self) -> Iterator[Token]:
@@ -137,6 +137,12 @@ class Token:
         while token is not None:
             yield token
             token = token.next
+
+    def drop(self) -> None:
+        if self.prev is not None:
+            self.prev.next = self.next
+        if self.next is not None:
+            self.next.prev = self.prev
 
     @classmethod
     def from_match(

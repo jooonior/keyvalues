@@ -22,8 +22,9 @@ from typing import (
     Any,
     Generic,
     Self,
+    TypeGuard,
     Union,
-    cast,
+    assert_never,
     overload,
 )
 
@@ -41,6 +42,8 @@ from .parse import (
 )
 
 if TYPE_CHECKING:
+    from types import EllipsisType
+
     from .parse import ParserFn
 
 
@@ -129,6 +132,9 @@ class Directive:
     def __getitem__(self, index: int | slice) -> Any:
         return self.content[index]
 
+    def __iter__(self) -> Iterator[Token | list[Token]]:
+        return iter(self.content)
+
     def __len__(self) -> int:
         return len(self.content)
 
@@ -169,7 +175,97 @@ if TYPE_CHECKING:
 
 
 class TokenFlags(utils.AutoFlagEnum):
+    EXPAND = ()
     OVERRIDE = ()
+
+    def parse(self, *tokens: Token) -> TokenFlags:
+        flags = self
+
+        for token in tokens:
+            flag = token.data.upper()
+
+            negate = flag.startswith("NO")
+            if negate:
+                flag = flag[2:]
+
+            try:
+                iflag = TokenFlags[flag]
+            except KeyError:
+                errmsg = f'invalid flag "{flag}"'
+                raise KeyValuesPreprocessorError(errmsg, token) from None
+            else:
+                if negate:
+                    flags &= ~iflag
+                else:
+                    flags |= iflag
+
+        return flags
+
+
+class Action(utils.AutoIntEnum):
+    CLEAR = ()
+    DELETE = ()
+
+    def to_comments(self, *payload: Token) -> Iterable[Token]:
+        yield Token(
+            f"<{self.name}>",
+            tag=TokenTag.COMMENT,
+            flags=TokenFlags.EXPAND,
+        )
+
+        for token in payload:
+            token.tag = TokenTag.COMMENT
+            yield token
+
+        yield Token(
+            f"</{self.name}>",
+            tag=TokenTag.COMMENT,
+            flags=TokenFlags.EXPAND,
+        )
+
+    @staticmethod
+    def from_comments(
+        first: Token,
+        tokens: Iterable[Token],
+    ) -> tuple[Action, list[Token]]:
+        name = first.data[1:-1]
+        action = Action[name]
+
+        payload = []
+        last = None
+
+        for token in tokens:
+            assert token.tag is TokenTag.COMMENT
+
+            if TokenFlags.EXPAND & token.flags:
+                last = token
+                break
+
+            # The original tag is lost, QUOTED is a safe choice.
+            token.tag = TokenTag.QUOTED
+            payload.append(token)
+
+        assert last is not None
+        assert last.data == f"</{name}>"
+
+        return action, payload
+
+
+# "NO" prefix is used to negate flags.
+assert all(not name.startswith("NO") for name in TokenFlags.__members__)
+
+
+def is_flat(items: list[T | list[T]]) -> TypeGuard[list[T]]:
+    return not any(isinstance(item, list) for item in items)
+
+
+def first_nested(items: list[T | list[T]]) -> list[T]:
+    for item in items:
+        if isinstance(item, list):
+            return item
+
+    errmsg = "list is flat"
+    raise ValueError(errmsg)
 
 
 class expand:  # noqa: N801
@@ -244,18 +340,16 @@ class expand:  # noqa: N801
                     case TokenRole.CONDITION if expect_modifier:
                         expect_modifier = False
 
-                        match = re.fullmatch(r"\$\[(.*)\]", token.data)
-                        if match is not None:
-                            expand = True
+                        if re.fullmatch(r"\$\[.*\]", token.data):
+                            subtokens = token[2:-1].split(r"\s")
+                            flags = TokenFlags.EXPAND.parse(*subtokens)
 
-                            for flag in match[1].split():
-                                flag = flag.upper()
-                                if flag == "NOEXPAND":
-                                    expand = False
-                                else:
-                                    assert last_key is not None
-                                    last_key.flags |= TokenFlags[flag]
+                            expand = TokenFlags.EXPAND in flags
 
+                            assert last_key is not None
+                            last_key.flags = flags
+
+                            # Don't yield this token.
                             continue
 
                         else:
@@ -302,6 +396,30 @@ class expand:  # noqa: N801
                 arguments = directive[2:]
                 yield from self.expand_definition(name, arguments, 1)
 
+            case "CLEAR":
+                whitelist = directive[1:]
+
+                if not is_flat(whitelist):
+                    section = first_nested(whitelist)
+                    errmsg = "invalid CLEAR key"
+                    raise KeyValuesPreprocessorError(errmsg, section[0])
+
+                yield from Action.CLEAR.to_comments(*whitelist)
+
+            case "DELETE":
+                if len(directive) < 2:
+                    errmsg = "missing keys to delete"
+                    raise KeyValuesPreprocessorError(errmsg, directive.end)
+
+                blacklist = directive[1:]
+
+                if not is_flat(blacklist):
+                    section = first_nested(blacklist)
+                    errmsg = "invalid DELETE key"
+                    raise KeyValuesPreprocessorError(errmsg, section[0])
+
+                yield from Action.DELETE.to_comments(*blacklist)
+
             case _:
                 errmsg = f'invalid directive "{first.data}"'
                 raise KeyValuesPreprocessorError(errmsg, first)
@@ -328,12 +446,10 @@ class expand:  # noqa: N801
             raise KeyValuesPreprocessorError(errmsg, name[0])
 
         params = directive[2:]
-        for param in params:
-            if isinstance(param, list):
-                errmsg = "invalid function parameter"
-                raise KeyValuesPreprocessorError(errmsg, param[0])
-
-        params = cast(list[Token], params)
+        if not is_flat(params):
+            section = first_nested(params)
+            errmsg = "invalid function parameter"
+            raise KeyValuesPreprocessorError(errmsg, section[0])
 
         content = [name.clone(depth=0)]
         # Read next condition (optional) and value (or section).
@@ -873,69 +989,190 @@ class KeyConditionValue(Generic[T]):
     key: Token
     condition: Token | None
     value: Token | T
-
-    @classmethod
-    def from_tuple(cls, tuple_: KeyValueTuple[T]) -> Self:
-        (key, condition), value = tuple_
-        return cls(key, condition, value)
+    deleted: bool = False
 
 
 class MergedKeyValues:
-    def __init__(
-        self,
-        loaded: Iterable[KeyValueTuple[MergedKeyValues] | Token],
-    ):
+    def __init__(self) -> None:
+        self.open: Token | None = None
         self.items: list[KeyConditionValue[MergedKeyValues]] = []
-        self.index: dict[tuple[str, str | None], int] = {}
+        self.close: Token | None = None
 
-        loaded = iter(loaded)
+        # Indices into `self.items`.
+        self.by_key: dict[str, int] = {}
+        self.by_key_and_condition: dict[tuple[str, str | None], int] = {}
 
-        # Peek first item.
-        first = next(loaded, None)
-        self.open = first if isinstance(first, Token) else None
-        self.close = None
+    def get(
+        self,
+        key: str | Token,
+        condition: str | Token | None | EllipsisType = Ellipsis,
+        *,
+        include_deleted: bool = False,
+    ) -> tuple[int, KeyConditionValue[MergedKeyValues] | None]:
+        if isinstance(key, Token):
+            key = key.data
+        if isinstance(condition, Token):
+            condition = condition.data
 
-        # Put first item back.
-        if isinstance(first, tuple):
-            loaded = itertools.chain([first], loaded)
+        if condition is Ellipsis:
+            index = self.by_key.get(key)
+        else:
+            index = self.by_key_and_condition.get((key, condition))
 
-        for item in loaded:
-            if isinstance(item, Token):
-                self.close = item
-                break
+        if index is None:
+            return -1, None
 
-            self.append(KeyConditionValue.from_tuple(item))
+        item = self.items[index]
+        return index, item if not item.deleted or include_deleted else None
 
-    def append(self, item: KeyConditionValue[MergedKeyValues]) -> None:
-        key = item.key
-        condition = item.condition
-        value = item.value
-
-        index_key = (
-            key.data,
-            None if condition is None else condition.data,
-        )
+    def append(
+        self,
+        key: Token,
+        condition: Token | None,
+        value: Token | MergedKeyValues,
+    ) -> int:
+        key_data = key.data
+        condition_data = None if condition is None else condition.data
 
         if TokenFlags.OVERRIDE & key.flags:
-            i = self.index.get(index_key)
-            if i is not None:
-                old = self.items[i]
-
-                if isinstance(old.value, MergedKeyValues) and isinstance(
+            index, item = self.get(key_data, condition_data)
+            if item is not None:
+                if isinstance(item.value, MergedKeyValues) and isinstance(
                     value, MergedKeyValues
                 ):
-                    old.value.merge(value)
+                    item.value.merge(value)
                 else:
-                    self.items[i].value = value
+                    item.value = value
+        else:
+            index = len(self.items)
+            self.by_key[key_data] = index
+            self.by_key_and_condition[key_data, condition_data] = index
 
-                return
+            self.items.append(KeyConditionValue(key, condition, value))
 
-        self.index[index_key] = len(self.items)
-        self.items.append(item)
+        return index
 
     def merge(self, other: MergedKeyValues) -> None:
         for item in other.items:
-            self.append(item)
+            self.append(item.key, item.condition, item.value)
+
+    def parse(self, tokens: Iterable[Token], depth: int = 0) -> None:
+        """Load contents from parsed tokens.
+
+        Assumes that `tokens` are well-formed.
+        """
+        filtered = self.filter_actions(tokens)
+        key = next(filtered)
+
+        while key.role is TokenRole.KEY:
+            value = next(filtered)
+
+            if value.role is TokenRole.CONDITION:
+                condition = value
+                value = next(filtered)
+            else:
+                condition = None
+
+            match value.role:
+                case TokenRole.OPEN:
+                    if TokenFlags.OVERRIDE & key.flags:
+                        _, item = self.get(key, condition)
+                        section = None if item is None else item.value
+                    else:
+                        section = None
+
+                    if isinstance(section, MergedKeyValues):
+                        # Parse into an existing section.
+                        section.parse(tokens, depth + 1)
+                    else:
+                        section = MergedKeyValues()
+                        section.open = value
+                        section.parse(tokens, depth + 1)
+                        self.append(key, condition, section)
+
+                    # The recursive call might have read the EOF token.
+                    nextkey = next(filtered, None)
+                    if nextkey is None:
+                        break
+
+                case TokenRole.VALUE:
+                    # Peeking ahead might read action comments which require
+                    # the item to already be appended (they might reference it).
+                    index = self.append(key, condition, value)
+
+                    nextkey = next(filtered)
+                    if nextkey.role is TokenRole.CONDITION:
+                        self.items[index].condition = nextkey
+                        nextkey = next(filtered)
+
+                case _:
+                    errmsg = "unexpected token role"
+                    raise AssertionError(errmsg)
+
+            key = nextkey
+
+        if key.role is TokenRole.CLOSE:
+            self.close = key
+
+    def filter_actions(self, tokens: Iterable[Token]) -> Iterator[Token]:
+        """Filter out semantically irrelevant tokens and apply action comments.
+
+        Actions are applied on `self`. Filtered tokens must not be passed to
+        nested instances!
+        """
+        for token in tokens:
+            if token.role is not None:
+                yield token
+
+            if token.tag is not TokenTag.COMMENT:
+                continue
+
+            if not TokenFlags.EXPAND & token.flags:
+                continue
+
+            self.apply_action(token, tokens)
+
+    def apply_action(self, token: Token, tokens: Iterable[Token]) -> None:
+        action, arguments = Action.from_comments(token, tokens)
+
+        match action:
+            case Action.DELETE:
+                for key in arguments:
+                    _, item = self.get(key)
+
+                    if item is None:
+                        errmsg = f'{action.name}: key "{key.data}" not found'
+                        raise KeyValuesPreprocessorError(errmsg, key)
+
+                    item.deleted = True
+
+            case Action.CLEAR:
+                for item in self.items:
+                    item.deleted = True
+
+                # Undelete selected items.
+                for key in arguments:
+                    _, item = self.get(key, include_deleted=True)
+
+                    if item is None:
+                        errmsg = f'{action.name}: key "{key.data}" not found'
+                        raise KeyValuesPreprocessorError(errmsg, key)
+
+                    item.deleted = False
+
+            case _ as unreachable:
+                assert_never(unreachable)
+
+        first = token
+        last = first if not arguments else arguments[-1]
+        # Get the actual last comment (see `Action.from_comments`).
+        assert last.next is not None
+        last = last.next
+        # Remove action comments from the output.
+        if first.prev is not None:
+            first.prev.next = last.next
+        if last.next is not None:
+            last.next.prev = first.prev
 
     def __iter__(self) -> Iterator[Token]:
         def yield_token(token: Token) -> Iterator[Token]:
@@ -946,6 +1183,9 @@ class MergedKeyValues:
             yield from yield_token(self.open)
 
         for item in self.items:
+            if item.deleted:
+                continue
+
             yield from yield_token(item.key)
 
             if isinstance(item.value, MergedKeyValues):
@@ -983,7 +1223,8 @@ def merge(tokens: Iterable[Token], _depth: int) -> Iterator[Token]:
     first = next(tokens)
     tokens = itertools.chain([first], tokens)
 
-    merged = loader(tokens, MergedKeyValues, pass_braces=True)
+    merged = MergedKeyValues()
+    merged.parse(tokens)
 
     yield first
 
