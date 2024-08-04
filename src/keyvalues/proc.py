@@ -276,6 +276,7 @@ class expand:  # noqa: N801
         self.locals = collections.ChainMap(self.globals)
         self.lookup: list[LookupMap] = [{}]
         self.default_flags = TokenFlags(0)
+        self.compat: str | None = None
 
     def __call__(self, tokens: Iterable[Token], depth: int) -> Iterator[Token]:
         last_key: Token | None = None
@@ -310,7 +311,12 @@ class expand:  # noqa: N801
                         assert self.lookup, "unmatched open/close"
 
                     case TokenRole.KEY:
-                        if token.tag is TokenTag.PLAIN and token.data == "{":
+                        if self.compat is not None:
+                            token.flags = self.default_flags
+                            last_key = token
+                            expect_modifier = False
+
+                        elif token.tag is TokenTag.PLAIN and token.data == "{":
                             # Directive is read from the unparsed token stream.
                             directive = Directive.read(token, tokens)
                             expanded = self.expand_directive(directive, tokens)
@@ -320,9 +326,10 @@ class expand:  # noqa: N801
                             repeat = True
                             break
 
-                        token.flags = self.default_flags
-                        last_key = token
-                        expect_modifier = True
+                        else:
+                            token.flags = self.default_flags
+                            last_key = token
+                            expect_modifier = True
 
                     case TokenRole.VALUE:
                         expect_modifier = False
@@ -348,6 +355,14 @@ class expand:  # noqa: N801
 
                             # Don't yield this token.
                             continue
+
+                    case None if (
+                        token.tag is TokenTag.COMMENT
+                        and self.compat is not None
+                        and token.data.strip() == self.compat
+                    ):
+                        self.compat = None
+                        continue
 
                 yield token
 
@@ -417,6 +432,10 @@ class expand:  # noqa: N801
             case "PRAGMA":
                 pragma = directive[1:]
 
+                if not pragma:
+                    errmsg = "empty pragma"
+                    raise KeyValuesPreprocessorError(errmsg, first)
+
                 if not is_flat(pragma):
                     section = first_nested(pragma)
                     errmsg = "invalid pragma directive"
@@ -434,6 +453,13 @@ class expand:  # noqa: N801
         match name.data.upper():
             case "FLAGS":
                 self.default_flags = TokenFlags(0).parse(*pragma[1:])
+
+            case "COMPAT":
+                if len(pragma) != 2:
+                    errmsg = "pragma COMPAT expects one argument"
+                    raise KeyValuesPreprocessorError(errmsg, name)
+
+                self.compat = pragma[1].data
 
             case _:
                 errmsg = f'unknown pragma "{name.data}"'
