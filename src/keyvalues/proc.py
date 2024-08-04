@@ -275,14 +275,14 @@ class expand:  # noqa: N801
         self.globals: dict[str, Definition] = {}
         self.locals = collections.ChainMap(self.globals)
         self.lookup: list[LookupMap] = [{}]
+        self.default_flags = TokenFlags(0)
 
     def __call__(self, tokens: Iterable[Token], depth: int) -> Iterator[Token]:
+        last_key: Token | None = None
+
         repeat = True
         while repeat:
             repeat = False
-
-            expand = False
-            last_key: Token | None = None
 
             for token in self.parser(tokens, depth):
                 depth = token.depth
@@ -310,9 +310,6 @@ class expand:  # noqa: N801
                         assert self.lookup, "unmatched open/close"
 
                     case TokenRole.KEY:
-                        last_key = token
-                        expect_modifier = True
-
                         if token.tag is TokenTag.PLAIN and token.data == "{":
                             # Directive is read from the unparsed token stream.
                             directive = Directive.read(token, tokens)
@@ -323,17 +320,20 @@ class expand:  # noqa: N801
                             repeat = True
                             break
 
+                        token.flags = self.default_flags
+                        last_key = token
+                        expect_modifier = True
+
                     case TokenRole.VALUE:
                         expect_modifier = False
 
-                        if expand:
+                        assert last_key is not None
+
+                        if TokenFlags.EXPAND & last_key.flags:
                             token = expand_expressions(
                                 token, self.evaluate_definition
                             )
 
-                        expand = False
-
-                        assert last_key is not None
                         self.lookup[-1][last_key.data] = token
 
                     case TokenRole.CONDITION if expect_modifier:
@@ -341,18 +341,13 @@ class expand:  # noqa: N801
 
                         if re.fullmatch(r"\$\[.*\]", token.data):
                             subtokens = token[2:-1].split(r"\s")
-                            flags = TokenFlags.EXPAND.parse(*subtokens)
-
-                            expand = TokenFlags.EXPAND in flags
 
                             assert last_key is not None
-                            last_key.flags = flags
+                            assert isinstance(last_key.flags, TokenFlags)
+                            last_key.flags = last_key.flags.parse(*subtokens)
 
                             # Don't yield this token.
                             continue
-
-                        else:
-                            expand = False
 
                 yield token
 
@@ -419,9 +414,30 @@ class expand:  # noqa: N801
 
                 yield from Action.DELETE.to_comments(*blacklist)
 
+            case "PRAGMA":
+                pragma = directive[1:]
+
+                if not is_flat(pragma):
+                    section = first_nested(pragma)
+                    errmsg = "invalid pragma directive"
+                    raise KeyValuesPreprocessorError(errmsg, section[0])
+
+                self.apply_pragma(pragma)
+
             case _:
                 errmsg = f'invalid directive "{first.data}"'
                 raise KeyValuesPreprocessorError(errmsg, first)
+
+    def apply_pragma(self, pragma: list[Token]) -> None:
+        name = pragma[0]
+
+        match name.data.upper():
+            case "FLAGS":
+                self.default_flags = TokenFlags(0).parse(*pragma[1:])
+
+            case _:
+                errmsg = f'unknown pragma "{name.data}"'
+                raise KeyValuesPreprocessorError(errmsg, name)
 
     def enter_scope(self) -> None:
         self.locals = self.locals.new_child()
