@@ -1089,13 +1089,15 @@ class MergedKeyValues:
             if token.role is not None:
                 yield token
 
-            if token.tag is not TokenTag.COMMENT:
-                continue
+            match token.tag:
+                case TokenTag.EOF:
+                    yield token
 
-            if not TokenFlags.EXPAND & token.flags:
-                continue
+                case TokenTag.COMMENT if TokenFlags.EXPAND & token.flags:
+                    self.apply_action(token, tokens)
 
-            self.apply_action(token, tokens)
+                case _:
+                    pass
 
     def apply_action(self, token: Token, tokens: Iterable[Token]) -> None:
         action, arguments = Action.from_comments(token, tokens)
