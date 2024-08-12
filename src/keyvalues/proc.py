@@ -13,7 +13,6 @@ from collections.abc import (
     Callable,
     Iterable,
     Iterator,
-    MutableMapping,
     Sequence,
 )
 from dataclasses import dataclass
@@ -272,8 +271,7 @@ class expand:  # noqa: N801
         functools.update_wrapper(self, parser)
 
         self.parser = parser
-        self.globals: dict[str, Definition] = {}
-        self.locals = collections.ChainMap(self.globals)
+        self.defs = collections.ChainMap[str, Definition]()
         self.lookup: list[LookupMap] = [{}]
         self.default_flags = TokenFlags(0)
         self.compat: str | None = None
@@ -386,11 +384,8 @@ class expand:  # noqa: N801
             case "END":
                 self.exit_scope()
 
-            case "LOCAL":
-                self.store_definition(directive, tokens, self.locals)
-
-            case "GLOBAL":
-                self.store_definition(directive, tokens, self.globals)
+            case "DEFINE":
+                self.store_definition(directive, tokens)
 
             case "INCLUDE":
                 if len(directive) < 2:
@@ -466,16 +461,15 @@ class expand:  # noqa: N801
                 raise KeyValuesPreprocessorError(errmsg, name)
 
     def enter_scope(self) -> None:
-        self.locals = self.locals.new_child()
+        self.defs = self.defs.new_child()
 
     def exit_scope(self) -> None:
-        self.locals = self.locals.parents
+        self.defs = self.defs.parents
 
     def store_definition(
         self,
         directive: Directive,
         tokens: Iterable[Token],
-        dest: MutableMapping[str, Definition],
     ) -> None:
         if len(directive) < 2:
             errmsg = "missing function name"
@@ -498,7 +492,7 @@ class expand:  # noqa: N801
         if is_condition(content[-1]):
             content.extend(read_balanced(tokens))
 
-        dest[name.data] = Definition(params, content)
+        self.defs[name.data] = Definition(params, content)
 
     def expand_definition(
         self,
@@ -506,7 +500,7 @@ class expand:  # noqa: N801
         arguments: Sequence[Token | Sequence[Token]],
         min_depth: int = 0,
     ) -> Iterator[Token]:
-        definition = self.locals.get(name.data)
+        definition = self.defs.get(name.data)
         if definition is None:
             errmsg = f'function "{name.data}" not found'
             raise KeyValuesPreprocessorError(errmsg, name)
@@ -537,7 +531,7 @@ class expand:  # noqa: N801
         # Define a nullary local function for each passed argument.
         for param, arg in zip(definition.params, arguments):
             yield from yield_directive(
-                Token("LOCAL", tag=TokenTag.PLAIN),
+                Token("DEFINE", tag=TokenTag.PLAIN),
                 Token(" ", tag=TokenTag.SPACE),
                 param,
             )
