@@ -470,7 +470,7 @@ class expand:  # noqa: N801
 
         match name.data.upper():
             case "FLAGS":
-                self.default_flags = TokenFlags(0).parse(*pragma[1:])
+                self.default_flags = self.default_flags.parse(*pragma[1:])
 
             case "COMPAT":
                 if len(pragma) != 2:
