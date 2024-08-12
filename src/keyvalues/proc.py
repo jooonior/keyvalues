@@ -979,6 +979,10 @@ class MergedKeyValues:
         if isinstance(condition, Token):
             condition = condition.data
 
+        key = key.lower()
+        if isinstance(condition, str):
+            condition = condition.lower()
+
         if condition is Ellipsis:
             index = self.by_key.get(key)
         else:
@@ -996,11 +1000,11 @@ class MergedKeyValues:
         condition: Token | None,
         value: Token | MergedKeyValues,
     ) -> int:
-        key_data = key.data
-        condition_data = None if condition is None else condition.data
+        key_str = key.data.lower()
+        condition_str = None if condition is None else condition.data.lower()
 
         if TokenFlags.OVERRIDE & key.flags:
-            index, item = self.get(key_data, condition_data)
+            index, item = self.get(key_str, condition_str)
             if item is not None:
                 if isinstance(item.value, MergedKeyValues) and isinstance(
                     value, MergedKeyValues
@@ -1010,8 +1014,8 @@ class MergedKeyValues:
                     item.value = value
         else:
             index = len(self.items)
-            self.by_key[key_data] = index
-            self.by_key_and_condition[key_data, condition_data] = index
+            self.by_key[key_str] = index
+            self.by_key_and_condition[key_str, condition_str] = index
 
             self.items.append(KeyConditionValue(key, condition, value))
 
