@@ -387,7 +387,7 @@ class expand:  # noqa: N801
             case "DEFINE":
                 self.store_definition(directive, tokens)
 
-            case "INCLUDE":
+            case "EXPAND":
                 if len(directive) < 2:
                     errmsg = "missing function name"
                     raise KeyValuesPreprocessorError(errmsg, directive.end)
