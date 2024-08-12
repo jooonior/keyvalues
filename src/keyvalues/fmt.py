@@ -123,7 +123,7 @@ def normalize_whitespace(
                     if comment_starts_with_space:
                         token.data = token.data.strip()
                         # Preserve comments like "//----" and such.
-                        if token.data[0].isalnum():
+                        if token.data[:1].isalnum():
                             token.data = f" {token.data}"
                     else:
                         token.data = token.data.rstrip()
