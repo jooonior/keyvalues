@@ -16,6 +16,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -103,6 +104,25 @@ def yield_directive(*tokens: Token) -> Iterator[Token]:
     yield Token("{", tag=TokenTag.PLAIN)
     yield from tokens
     yield Token("}", tag=TokenTag.PLAIN)
+
+
+def is_range_finite(start: Any, end: Any, step: Any) -> Any:
+    return step > 0 if start <= end else step < 0
+
+
+def xrange(start: Any, end: Any, step: Any) -> Iterator[Any]:
+    if step == 0:
+        errmsg = "step must be nonzero"
+        raise ValueError(errmsg)
+
+    if step > 0:
+        while start < end:
+            yield start
+            start += step
+    else:
+        while start > end:
+            yield start
+            start += step
 
 
 @dataclass
@@ -400,6 +420,9 @@ class expand:  # noqa: N801
                 arguments = directive[2:]
                 yield from self.expand_definition(name, arguments, 1)
 
+            case "FOR":
+                yield from self.expand_loop(directive, tokens)
+
             case "CLEAR":
                 whitelist = directive[1:]
 
@@ -605,6 +628,114 @@ class expand:  # noqa: N801
         assert isinstance(value, Token)
         return value
 
+    def expand_loop(
+        self,
+        directive: Directive,
+        tokens: Iterable[Token],
+    ) -> Iterator[Token]:
+        length = len(directive)
+
+        if length < 3:
+            errmsg = "invalid FOR directive"
+            raise KeyValuesPreprocessorError(errmsg, directive.end)
+
+        name = directive[1]
+        if isinstance(name, list):
+            errmsg = "invalid loop control variable name"
+            raise KeyValuesPreprocessorError(errmsg, name[0])
+
+        loop_kind = directive[2]
+        if isinstance(loop_kind, list):
+            errmsg = "invalid FOR directive"
+            raise KeyValuesPreprocessorError(errmsg, loop_kind[0])
+
+        items: Iterable[Token | list[Token]]
+
+        match loop_kind.data.upper():
+            case "IN":
+                items = directive[3:]
+
+            case "BETWEEN":
+                if length < 4:
+                    errmsg = "missing loop start"
+                    raise KeyValuesPreprocessorError(errmsg, directive.end)
+
+                start = directive[3]
+                if isinstance(start, list):
+                    errmsg = "invalid loop start"
+                    raise KeyValuesPreprocessorError(errmsg, start[0])
+
+                try:
+                    n_start = Decimal(start.data)
+                except decimal.InvalidOperation:
+                    errmsg = "invalid loop start"
+                    raise KeyValuesPreprocessorError(errmsg, start) from None
+
+                if length < 5:
+                    errmsg = "missing loop end"
+                    raise KeyValuesPreprocessorError(errmsg, directive.end)
+
+                end = directive[4]
+                if isinstance(end, list):
+                    errmsg = "invalid loop end"
+                    raise KeyValuesPreprocessorError(errmsg, end[0])
+
+                try:
+                    n_end = Decimal(end.data)
+                except decimal.InvalidOperation:
+                    errmsg = "invalid loop end"
+                    raise KeyValuesPreprocessorError(errmsg, end) from None
+
+                if length > 5:
+                    step = directive[5]
+
+                    if isinstance(step, list):
+                        errmsg = "invalid loop step"
+                        raise KeyValuesPreprocessorError(errmsg, step[0])
+
+                    try:
+                        n_step = Decimal(step.data)
+                    except decimal.InvalidOperation:
+                        errmsg = "invalid loop step"
+                        raise KeyValuesPreprocessorError(errmsg, step) from None
+
+                    if not is_range_finite(n_start, n_end, n_step):
+                        errmsg = "loop step results in an infinite loop"
+                        raise KeyValuesPreprocessorError(errmsg, step)
+
+                else:
+                    n_step = Decimal(1 if n_start <= n_end else -1)
+
+                items = (
+                    Token(format(n, "f"), tag=TokenTag.PLAIN)
+                    for n in xrange(n_start, n_end, n_step)
+                )
+
+            case _:
+                errmsg = "invalid FOR directive"
+                raise KeyValuesPreprocessorError(errmsg, loop_kind)
+
+        # Get loop body without surrounding braces.
+        body = [token for token in read_balanced(tokens) if token.depth > 0]
+
+        yield from yield_directive(Token("BEGIN", tag=TokenTag.PLAIN))
+
+        for item in items:
+            yield from yield_directive(
+                Token("DEFINE", tag=TokenTag.PLAIN),
+                Token(" ", tag=TokenTag.SPACE),
+                name,
+            )
+
+            if isinstance(item, list):
+                yield from item
+            else:
+                yield item
+
+            yield from body
+
+        yield from yield_directive(Token("END", tag=TokenTag.PLAIN))
+
 
 class ExpressionTag(utils.RegexEnum):
     # fmt: off
@@ -692,9 +823,9 @@ def tokenize_arguments(expression: Token) -> Iterator[Token]:
     raise KeyValuesExpressionError(errmsg, token)
 
 
-def to_decimal(token: Token) -> decimal.Decimal:
+def to_decimal(token: Token) -> Decimal:
     if token.tag is ExpressionTag.NUMBER:
-        return decimal.Decimal(token.data)
+        return Decimal(token.data)
 
     errmsg = f'"{token}" cannot be converted to a number'
     raise KeyValuesExpressionError(errmsg, token)
@@ -708,8 +839,8 @@ class Operator:
 
     def invoke(self, token: Token, *args: Token) -> Token:
         value = self.op(*map(to_decimal, args))
-        if not isinstance(value, decimal.Decimal):
-            value = decimal.Decimal(value)
+        if not isinstance(value, Decimal):
+            value = Decimal(value)
 
         token = token.clone(data=format(value, "f"))
         token.tag = ExpressionTag.NUMBER
