@@ -298,7 +298,6 @@ class expand:  # noqa: N801
 
     def __call__(self, tokens: Iterable[Token], depth: int) -> Iterator[Token]:
         last_key: Token | None = None
-        stored_tokens = []
 
         repeat = True
         while repeat:
@@ -346,13 +345,14 @@ class expand:  # noqa: N801
                             break
 
                         else:
+                            if TokenFlags.EXPAND & self.default_flags:
+                                token = expand_expressions(
+                                    token, self.evaluate_definition
+                                )
+
                             token.flags = self.default_flags
                             last_key = token
                             expect_modifier = True
-
-                            # Don't yield the key just yet.
-                            stored_tokens.append(token)
-                            continue
 
                     case TokenRole.VALUE:
                         expect_modifier = False
@@ -386,23 +386,6 @@ class expand:  # noqa: N801
                     ):
                         self.compat = None
                         continue
-
-                    case None if stored_tokens:
-                        # Delay yielding whitespace if something is stored.
-                        stored_tokens.append(token)
-                        continue
-
-                if stored_tokens:
-                    # Expand stored key if the flag is set.
-                    stored_key = stored_tokens[0]
-                    if TokenFlags.EXPAND & stored_key.flags:
-                        assert stored_key.role is TokenRole.KEY
-                        stored_tokens[0] = expand_expressions(
-                            stored_key, self.evaluate_definition
-                        )
-
-                    yield from stored_tokens
-                    stored_tokens.clear()
 
                 yield token
 
