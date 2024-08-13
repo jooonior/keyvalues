@@ -1313,17 +1313,17 @@ class MergedKeyValues:
 
 
 def chain(tokens: Iterable[Token]) -> Iterator[Token]:
-    prev: Token | None = None
+    tokens = iter(tokens)
+    prev = next(tokens)
 
     for token in tokens:
         token.prev = prev
+        prev.next = token
 
-        if prev is not None:
-            prev.next = token
-
+        yield prev
         prev = token
 
-        yield token
+    yield prev
 
 
 @parser_decorator
