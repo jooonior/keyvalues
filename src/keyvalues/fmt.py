@@ -41,7 +41,7 @@ def normalize_whitespace(
 
     @parser_decorator
     def formatter(tokens: Iterable[Token], _depth: int) -> Iterator[Token]:
-        newlines = 0
+        newlines = 1
         need_newline = False
         prev_token: Token | None = None
         prev_semantic_token: Token | None = None
