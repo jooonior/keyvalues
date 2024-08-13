@@ -411,6 +411,16 @@ class expand:  # noqa: N801
         directive: Directive,
         tokens: Iterable[Token],
     ) -> Iterator[Token]:
+        directive.content = [
+            expand_expressions(outer, self.evaluate_definition)
+            if isinstance(outer, Token)
+            else [
+                expand_expressions(inner, self.evaluate_definition)
+                for inner in outer
+            ]
+            for outer in directive.content
+        ]
+
         first = directive[0]
         if isinstance(first, list):
             errmsg = "invalid directive name"
