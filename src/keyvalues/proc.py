@@ -1159,13 +1159,14 @@ class MergedKeyValues:
                     item.value.merge(value)
                 else:
                     item.value = value
-        else:
-            index = len(self.items)
-            self.by_key[key_str] = index
-            self.by_key_and_condition[key_str, condition_str] = index
 
-            self.items.append(KeyConditionValue(key, condition, value))
+                return index
 
+        index = len(self.items)
+        self.by_key[key_str] = index
+        self.by_key_and_condition[key_str, condition_str] = index
+
+        self.items.append(KeyConditionValue(key, condition, value))
         return index
 
     def merge(self, other: MergedKeyValues) -> None:
