@@ -32,12 +32,12 @@ if TYPE_CHECKING:
 else:
 
     class RegexEnumMeta(enum.EnumType):
-        def __getattr__(self, name: str) -> Any:
-            if self is RegexEnum:
+        def __getattr__(cls, name: str) -> Any:
+            if cls is RegexEnum:
                 return getattr(super(), name)
 
-            attr = getattr(self._re, name)
-            setattr(self, name, attr)
+            attr = getattr(cls._re, name)
+            setattr(cls, name, attr)
             return attr
 
 
