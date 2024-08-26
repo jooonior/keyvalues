@@ -192,6 +192,32 @@ if TYPE_CHECKING:
     LookupMap = dict[str, Token | LookupMap]  # noqa: F821
 
 
+def follow_path(lookup: Iterable[LookupMap], path: Token) -> LookupMap | Token:
+    stack: list[LookupMap | Token] = list(lookup)
+
+    for key in path.split("/"):
+        dots = key.data.count(".")
+        if dots == len(key.data):
+            for _ in range(dots - 1):
+                stack.pop()
+        else:
+            parent = stack[-1]
+
+            if isinstance(parent, Token):
+                errmsg = "invalid path"
+                raise KeyValuesPreprocessorError(errmsg, path)
+
+            child = parent.get(key.data.lower())
+
+            if child is None:
+                errmsg = f'key "{key.data}" not found'
+                raise KeyValuesPreprocessorError(errmsg, key)
+
+            stack.append(child)
+
+    return stack[-1]
+
+
 class TokenFlags(utils.AutoFlagEnum):
     EXPAND = ()
     OVERRIDE = ()
@@ -435,6 +461,24 @@ class expand:  # noqa: N801
                 arguments = directive[2:]
                 yield from self.expand_definition(name, arguments, 1)
 
+            case "INHERIT":
+                if len(directive) < 2:
+                    errmsg = "missing inherited path"
+                    raise KeyValuesPreprocessorError(errmsg, directive.end)
+
+                path = directive[1]
+                if isinstance(path, list):
+                    errmsg = "invalid INHERIT source path"
+                    raise KeyValuesPreprocessorError(errmsg, path[0])
+
+                keys = directive[2:]
+                if not is_flat(keys):
+                    section = first_nested(keys)
+                    errmsg = "invalid INHERIT key"
+                    raise KeyValuesPreprocessorError(errmsg, section[0])
+
+                yield from self.expand_inherit(path, keys)
+
             case "FOR":
                 yield from self.expand_loop(directive, tokens)
 
@@ -607,30 +651,7 @@ class expand:  # noqa: N801
 
         # Wihout arguments, evaluate name as relative path.
 
-        levels: list[LookupMap | Token] = self.lookup.copy()  # type: ignore[assignment]
-
-        for key in name.split("/"):
-            dots = key.data.count(".")
-            if dots == len(key.data):
-                for _ in range(dots - 1):
-                    levels.pop()
-            else:
-                parent = levels[-1]
-
-                if isinstance(parent, Token):
-                    errmsg = "invalid path"
-                    raise KeyValuesPreprocessorError(errmsg, name)
-
-                child = parent.get(key.data.lower())
-
-                if child is None:
-                    errmsg = f'key "{key.data}" not found'
-                    raise KeyValuesPreprocessorError(errmsg, key)
-
-                levels.append(child)
-
-        value = levels[-1]
-
+        value = follow_path(self.lookup, name)
         if isinstance(value, Token):
             return value
 
@@ -642,6 +663,37 @@ class expand:  # noqa: N801
 
         assert isinstance(value, Token)
         return value
+
+    def expand_inherit(
+        self,
+        path: Token,
+        keys: list[Token],
+    ) -> Iterator[Token]:
+        source = follow_path(self.lookup, path)
+        if isinstance(source, Token):
+            errmsg = "INHERIT source path leads to value"
+            raise KeyValuesPreprocessorError(errmsg, path)
+
+        if keys:
+            for key in keys:
+                value = source.get(key.data.lower())
+
+                if value is None:
+                    errmsg = f'INHERIT key "{key.data}" not found in source'
+                    raise KeyValuesPreprocessorError(errmsg, path)
+
+                if not isinstance(value, Token):
+                    errmsg = f'INHERIT key "{key.data}" refers to a section'
+                    raise KeyValuesPreprocessorError(errmsg, path)
+
+                yield key
+                yield value
+
+        else:
+            for key_data, value in source.items():
+                if key_data != "." and isinstance(value, Token):
+                    yield Token(key_data, tag=TokenTag.QUOTED)
+                    yield value
 
     def expand_loop(
         self,
