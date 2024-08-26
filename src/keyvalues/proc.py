@@ -313,12 +313,12 @@ class expand:  # noqa: N801
                         parent = self.lookup[-1]
 
                         assert last_key is not None
-                        child = parent.get(last_key.data)
+                        child = parent.get(last_key.data.lower())
 
                         if not isinstance(child, dict):
                             # "." stores the key of this section.
                             child = {".": last_key}
-                            parent[last_key.data] = child
+                            parent[last_key.data.lower()] = child
 
                         self.lookup.append(child)
 
@@ -364,7 +364,7 @@ class expand:  # noqa: N801
                                 token, self.evaluate_definition
                             )
 
-                        self.lookup[-1][last_key.data] = token
+                        self.lookup[-1][last_key.data.lower()] = token
 
                     case TokenRole.CONDITION if expect_modifier:
                         expect_modifier = False
@@ -621,7 +621,7 @@ class expand:  # noqa: N801
                     errmsg = "invalid path"
                     raise KeyValuesPreprocessorError(errmsg, name)
 
-                child = parent.get(key.data)
+                child = parent.get(key.data.lower())
 
                 if child is None:
                     errmsg = f'key "{key.data}" not found'
