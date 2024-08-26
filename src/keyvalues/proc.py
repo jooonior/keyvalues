@@ -780,7 +780,7 @@ class ExpressionTag(utils.RegexEnum):
 
     NUMBER = r"[+-]?(?:\.\d+|\d+(?:\.\d*)?)"
     PATH   = r"\.[/.\w]*"
-    NAME   = r"[^\W\d][\w]*"
+    NAME   = r"[^\W\d][\w.]*"
 
     SPACE  = r"\s+"
     ERROR  = r".+?"  # only single character, unless matching whole string
