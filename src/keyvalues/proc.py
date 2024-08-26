@@ -581,7 +581,7 @@ class expand:  # noqa: N801
         # Yield only tokens inside a section.
         for token in definition.content:
             if token.depth >= min_depth:
-                yield token
+                yield token.clone()
 
         # Close the scope created for the expanded function.
         yield from yield_directive(Token("END", tag=TokenTag.PLAIN))
@@ -747,7 +747,8 @@ class expand:  # noqa: N801
             else:
                 yield item
 
-            yield from body
+            for token in body:
+                yield token.clone()
 
         yield from yield_directive(Token("END", tag=TokenTag.PLAIN))
 
