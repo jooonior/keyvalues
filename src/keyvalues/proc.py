@@ -396,7 +396,7 @@ class expand:  # noqa: N801
                         expect_modifier = False
 
                         if re.fullmatch(r"\$\[.*\]", token.data):
-                            subtokens = token[2:-1].split(r"\s")
+                            subtokens = token[2:-1].split(r",")
 
                             assert last_key is not None
                             assert isinstance(last_key.flags, TokenFlags)
