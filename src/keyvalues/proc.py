@@ -1167,13 +1167,15 @@ class KeyConditionValue(Generic[T]):
     key: Token
     condition: Token | None
     value: Token | T
-    deleted: bool = False
+
+    def unpack(self) -> tuple[Token, Token | None, Token | T]:
+        return self.key, self.condition, self.value
 
 
 class MergedKeyValues:
     def __init__(self) -> None:
         self.open: Token | None = None
-        self.items: list[KeyConditionValue[MergedKeyValues]] = []
+        self.items: list[KeyConditionValue[MergedKeyValues] | None] = []
         self.close: Token | None = None
 
         # Indices into `self.items`.
@@ -1184,8 +1186,6 @@ class MergedKeyValues:
         self,
         key: str | Token,
         condition: str | Token | None | EllipsisType = Ellipsis,
-        *,
-        include_deleted: bool = False,
     ) -> tuple[int, KeyConditionValue[MergedKeyValues] | None]:
         if isinstance(key, Token):
             key = key.data
@@ -1205,39 +1205,61 @@ class MergedKeyValues:
             return -1, None
 
         item = self.items[index]
-        return index, item if not item.deleted or include_deleted else None
+        return index, item
+
+    def pop(self, index: int) -> KeyConditionValue[MergedKeyValues] | None:
+        item = self.items[index]
+
+        if item is None:
+            return None
+
+        self.items[index] = None
+
+        key, condition, _ = item.unpack()
+
+        key_str = key.data.lower()
+        condition_str = None if condition is None else condition.data.lower()
+
+        del self.by_key[key_str]
+        del self.by_key_and_condition[key_str, condition_str]
+
+        return item
 
     def append(
         self,
-        key: Token,
-        condition: Token | None,
-        value: Token | MergedKeyValues,
+        item: KeyConditionValue[MergedKeyValues],
     ) -> int:
+        key, condition, value = item.unpack()
+
         key_str = key.data.lower()
         condition_str = None if condition is None else condition.data.lower()
 
         if TokenFlags.OVERRIDE & key.flags:
-            index, item = self.get(key_str, condition_str)
-            if item is not None:
-                if isinstance(item.value, MergedKeyValues) and isinstance(
+            index, other = self.get(key_str, condition_str)
+            if other is not None:
+                if isinstance(other.value, MergedKeyValues) and isinstance(
                     value, MergedKeyValues
                 ):
-                    item.value.merge(value)
+                    other.value.merge(value)
                 else:
-                    item.value = value
+                    other.value = value
 
                 return index
+
+        # Clear the OVERRIDE flag to skip the above branch when moving items.
+        key.flags &= ~TokenFlags.OVERRIDE
 
         index = len(self.items)
         self.by_key[key_str] = index
         self.by_key_and_condition[key_str, condition_str] = index
 
-        self.items.append(KeyConditionValue(key, condition, value))
+        self.items.append(item)
         return index
 
     def merge(self, other: MergedKeyValues) -> None:
         for item in other.items:
-            self.append(item.key, item.condition, item.value)
+            if item is not None:
+                self.append(item)
 
     def parse(self, tokens: Iterable[Token], depth: int = 0) -> None:
         """Load contents from parsed tokens.
@@ -1271,7 +1293,7 @@ class MergedKeyValues:
                         section = MergedKeyValues()
                         section.open = value
                         section.parse(tokens, depth + 1)
-                        self.append(key, condition, section)
+                        self.append(KeyConditionValue(key, condition, section))
 
                     # The recursive call might have read the EOF token.
                     nextkey = next(filtered, None)
@@ -1281,11 +1303,15 @@ class MergedKeyValues:
                 case TokenRole.VALUE:
                     # Peeking ahead might read action comments which require
                     # the item to already be appended (they might reference it).
-                    index = self.append(key, condition, value)
+                    index = self.append(
+                        KeyConditionValue(key, condition, value)
+                    )
 
                     nextkey = next(filtered)
                     if nextkey.role is TokenRole.CONDITION:
-                        self.items[index].condition = nextkey
+                        last_item = self.items[index]
+                        assert last_item is not None, "just appended this"
+                        last_item.condition = nextkey
                         nextkey = next(filtered)
 
                 case _:
@@ -1323,27 +1349,30 @@ class MergedKeyValues:
         match action:
             case Action.DELETE:
                 for key in arguments:
-                    _, item = self.get(key)
+                    index, item = self.get(key)
 
                     if item is None:
                         errmsg = f'{action.name}: key "{key.data}" not found'
                         raise KeyValuesPreprocessorError(errmsg, key)
 
-                    item.deleted = True
+                    self.pop(index)
 
             case Action.CLEAR:
-                for item in self.items:
-                    item.deleted = True
+                indices_to_delete = [True] * len(self.items)
 
                 # Undelete selected items.
                 for key in arguments:
-                    _, item = self.get(key, include_deleted=True)
+                    index, item = self.get(key)
 
                     if item is None:
                         errmsg = f'{action.name}: key "{key.data}" not found'
                         raise KeyValuesPreprocessorError(errmsg, key)
 
-                    item.deleted = False
+                    indices_to_delete[index] = False
+
+                for index, should_delete in enumerate(indices_to_delete):
+                    if should_delete:
+                        self.pop(index)
 
             case _ as unreachable:
                 assert_never(unreachable)
@@ -1368,7 +1397,7 @@ class MergedKeyValues:
             yield from yield_token(self.open)
 
         for item in self.items:
-            if item.deleted:
+            if item is None:
                 continue
 
             yield from yield_token(item.key)
