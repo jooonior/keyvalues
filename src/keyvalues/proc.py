@@ -249,6 +249,7 @@ class TokenFlags(utils.AutoFlagEnum):
 class Action(utils.AutoIntEnum):
     CLEAR = ()
     DELETE = ()
+    MOVE = ()
 
     def to_comments(self, *payload: Token) -> Iterable[Token]:
         yield Token(
@@ -491,6 +492,15 @@ class expand:  # noqa: N801
                     raise KeyValuesPreprocessorError(errmsg, section[0])
 
                 yield from Action.CLEAR.to_comments(*whitelist)
+
+            case "MOVE":
+                keys = directive[1:]
+                if not is_flat(keys):
+                    section = first_nested(keys)
+                    errmsg = "invalid MOVE key"
+                    raise KeyValuesPreprocessorError(errmsg, section[0])
+
+                yield from Action.MOVE.to_comments(*keys)
 
             case "DELETE":
                 if len(directive) < 2:
@@ -1373,6 +1383,17 @@ class MergedKeyValues:
                 for index, should_delete in enumerate(indices_to_delete):
                     if should_delete:
                         self.pop(index)
+
+            case Action.MOVE:
+                for key in arguments:
+                    index, item = self.get(key)
+
+                    if item is None:
+                        errmsg = f'{action.name}: key "{key.data}" not found'
+                        raise KeyValuesPreprocessorError(errmsg, key)
+
+                    self.pop(index)
+                    self.append(item)
 
             case _ as unreachable:
                 assert_never(unreachable)
