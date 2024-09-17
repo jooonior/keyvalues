@@ -810,6 +810,13 @@ class ExpressionTag(utils.RegexEnum):
     AND    = r"&&"
     OR     = r"\|\|"
 
+    BNOT   = r"~"
+    BAND   = r"&"
+    BOR    = r"\|"
+
+    LSHIFT = r"<<"
+    RSHIFT = r">>"
+
     EQ     = r"=="
     NE     = r"!="
     NOT    = r"!"
@@ -900,13 +907,21 @@ def to_decimal(token: Token) -> Decimal:
 
 
 class Operator:
-    def __init__(self, op: Callable[..., Any], bp: int, *, infixl: bool = True):
+    def __init__(
+        self,
+        op: Callable[..., Any],
+        bp: int,
+        *,
+        infixl: bool = True,
+        cast: Callable[[Decimal], Any] | None = None,
+    ):
         self.op = op
         self.lbp = bp * 2 + (1 - infixl)
         self.rbp = bp * 2
+        self.cast = cast if cast is not None else lambda x: x
 
     def invoke(self, token: Token, *args: Token) -> Token:
-        value = self.op(*map(to_decimal, args))
+        value = self.op(*map(self.cast, map(to_decimal, args)))
         if not isinstance(value, Decimal):
             value = Decimal(value)
 
@@ -919,6 +934,7 @@ PREFIX_OPERATORS = {
     ExpressionTag.PLUS: Operator(operator.pos, 9),
     ExpressionTag.MINUS: Operator(operator.neg, 9),
     ExpressionTag.NOT: Operator(operator.not_, 9),
+    ExpressionTag.BNOT: Operator(operator.inv, 9, cast=int),
 }
 
 INFIX_OPERATORS = {
@@ -930,12 +946,16 @@ INFIX_OPERATORS = {
     ExpressionTag.LT: Operator(operator.lt, 3),
     ExpressionTag.GE: Operator(operator.ge, 3),
     ExpressionTag.GT: Operator(operator.gt, 3),
-    ExpressionTag.PLUS: Operator(operator.add, 4),
-    ExpressionTag.MINUS: Operator(operator.sub, 4),
-    ExpressionTag.MULT: Operator(operator.mul, 5),
-    ExpressionTag.DIVIDE: Operator(operator.truediv, 5),
-    ExpressionTag.MODULO: Operator(operator.mod, 5),
-    ExpressionTag.POWER: Operator(operator.pow, 6, infixl=False),
+    ExpressionTag.BAND: Operator(operator.and_, 4, cast=int),
+    ExpressionTag.BOR: Operator(operator.or_, 5, cast=int),
+    ExpressionTag.LSHIFT: Operator(operator.lshift, 6, cast=int),
+    ExpressionTag.RSHIFT: Operator(operator.rshift, 6, cast=int),
+    ExpressionTag.PLUS: Operator(operator.add, 7),
+    ExpressionTag.MINUS: Operator(operator.sub, 7),
+    ExpressionTag.MULT: Operator(operator.mul, 8),
+    ExpressionTag.DIVIDE: Operator(operator.truediv, 8),
+    ExpressionTag.MODULO: Operator(operator.mod, 8),
+    ExpressionTag.POWER: Operator(operator.pow, 9, infixl=False),
 }
 
 
