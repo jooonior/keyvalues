@@ -1,0 +1,31 @@
+[tool.mypy]
+strict = true
+allow_redefinition = true
+warn_unreachable = true
+warn_unused_ignores = true
+
+[tool.ruff]
+line-length = 80
+src=["src"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "ANN401",   # `Any` type annotations
+    "C90",      # complexity
+    "COM",      # trailing commas
+    "D1",       # undocumented objects
+    "D213",     # multi-line docstring summary should start at the second line
+    "D203",     # blank line required before class docstring
+    "ISC",      # implicit string concatenation
+    "PLR09",    # too many arguments, statements, branches, etc.
+    "PLR2004",  # magic value used in comparison
+    "PLW2901",  # assigning to loop variable
+    "Q",        # quotes
+    "S101",     # assert not allowed
+    "TD002",    # missing todo author
+    "TD003",    # missing todo issue link
+]
+
+[tool.ruff.lint.flake8-annotations]
+mypy-init-return = true
