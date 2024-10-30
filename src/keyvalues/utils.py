@@ -5,6 +5,8 @@ import enum
 import itertools
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
@@ -47,6 +49,37 @@ class CaseInsensitiveDict(Generic[T], collections.UserDict[str, T]):
         if isinstance(key, str):
             key = key.lower()
         return super().__contains__(key)
+
+
+N = TypeVar("N", int, float, Decimal)
+
+
+@dataclass
+class xrange(Generic[N]):  # noqa: N801
+    start: N
+    end: N
+    step: N
+
+    def __post_init__(self) -> None:
+        if self.step == 0:
+            errmsg = "step is zero"
+            raise ValueError(errmsg)
+
+        if self.step < 0 if self.start <= self.end else self.step > 0:
+            errmsg = "range is infinite"
+            raise ValueError(errmsg)
+
+    def __iter__(self) -> Iterator[N]:
+        n = self.start
+
+        if self.step > 0:
+            while n < self.end:
+                yield n
+                n += self.step
+        else:
+            while n > self.end:
+                yield n
+                n += self.step
 
 
 class Peekable(Generic[T], Iterator[T]):

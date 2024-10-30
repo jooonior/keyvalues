@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import decimal
 import itertools
 from collections import ChainMap
+from contextlib import contextmanager
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
@@ -21,7 +24,7 @@ if TYPE_CHECKING:
         TypeVar,
     )
 
-from . import dbg, expr, tree
+from . import dbg, expr, tree, utils
 from .parse import (
     ParsedToken,
     ParsedTokenRole,
@@ -60,20 +63,27 @@ def read_balanced(
             # Braces are not considered to be inside of their sections.
 
             case ParsedTokenTag.PLAIN if token.data == "{":
-                token.meta["depth"] = depth
+                if depth > 0:
+                    token.meta["depth"] = depth
+                    yield token
+
                 depth += 1
 
             case ParsedTokenTag.PLAIN if token.data == "}":
                 depth -= 1
-                token.meta["depth"] = depth
+
+                if depth > 0:
+                    token.meta["depth"] = depth
+                    yield token
+                else:
+                    break
 
             case _:
                 token.meta["depth"] = depth
+                yield token
 
-        yield token
-
-        if depth == 0:
-            break
+                if depth == 0:
+                    break
 
 
 class PreprocessorError(TokenError):
@@ -230,6 +240,14 @@ class Preprocessor(Directives):
         dbg.log(f"exit scope, depth {len(self.defs.maps) - 1}")
         self.defs = self.defs.parents
 
+    @contextmanager
+    def scoped(self) -> Iterator[None]:
+        try:
+            self.enter_scope()
+            yield
+        finally:
+            self.exit_scope()
+
     def expand_directive(
         self,
         tokens: Iterator[ParsedToken],
@@ -316,26 +334,23 @@ class Preprocessor(Directives):
 
             raise exc
 
-        self.enter_scope()
+        with self.scoped():
+            for param, arg in zip(definition.params, arguments):
+                self.defs[param.data] = Definition(
+                    params=[],
+                    body=[
+                        ParsedToken.from_other(
+                            arg,
+                            tag=ParsedTokenTag.QUOTED,
+                            meta={"depth": self.depth},
+                        ),
+                    ],
+                )
 
-        for param, arg in zip(definition.params, arguments):
-            self.defs[param.data] = Definition(
-                params=[],
-                body=[
-                    ParsedToken.from_other(
-                        arg,
-                        tag=ParsedTokenTag.QUOTED,
-                        meta={"depth": self.depth},
-                    ),
-                ],
-            )
-
-        for token in definition.body:
-            token = token.clone()
-            token.meta["depth"] += self.depth
-            yield token
-
-        self.exit_scope()
+            for token in definition.body:
+                token = token.clone()
+                token.meta["depth"] += self.depth
+                yield token
 
     @Directives.directive("DEFINE", "DEF")
     def do_DEFINE(  # noqa: N802
@@ -356,11 +371,6 @@ class Preprocessor(Directives):
 
         body = list(read_balanced(tokens, depth=0))
 
-        # Remove outer braces if it's a section.
-        last = body[-1]
-        if last.tag == ParsedTokenTag.PLAIN and last.data == "}":
-            body = [token for token in body if token.meta["depth"] > 0]
-
         self.defs[name.data] = Definition(params, body)
 
     @Directives.directive("EXPAND")
@@ -375,7 +385,7 @@ class Preprocessor(Directives):
 
         arguments = iter(arguments)
         name = next(arguments)
-        arguments = list(arguments)
+        arguments = [self.evaluate_token(arg) for arg in arguments]
 
         return self.expand_definition(name, arguments)
 
@@ -446,6 +456,101 @@ class Preprocessor(Directives):
 
                 if child.value.close is not None:
                     yield child.value.close.clone()
+
+    @Directives.directive("FOR")
+    def do_FOR(  # noqa: N802
+        self,
+        arguments: list[ParsedToken],
+        tokens: Iterator[ParsedToken],
+    ) -> Iterator[ParsedToken]:
+        argc = len(arguments)
+
+        if argc < 1:
+            errmsg = "missing control variable name"
+            raise DirectiveError(errmsg)
+
+        control_variable_name = arguments[0]
+
+        if argc <= 2:
+            errmsg = "missing loop range keyword"
+            raise DirectiveError(errmsg)
+
+        range_keyword = arguments[1]
+        items: Iterable[ParsedToken]
+
+        match range_keyword.data.upper():
+            case "IN":
+                items = arguments[2:]
+
+            case "BETWEEN":
+                if argc < 3:
+                    errmsg = "missing loop start"
+                    raise DirectiveError(errmsg)
+
+                start = arguments[2]
+
+                try:
+                    n_start = Decimal(start.data)
+                except decimal.InvalidOperation:
+                    errmsg = "invalid loop start"
+                    raise DirectiveError(errmsg, start) from None
+
+                if argc < 4:
+                    errmsg = "missing loop end"
+                    raise DirectiveError(errmsg)
+
+                end = arguments[3]
+
+                try:
+                    n_end = Decimal(end.data)
+                except decimal.InvalidOperation:
+                    errmsg = "invalid loop end"
+                    raise DirectiveError(errmsg, end) from None
+
+                if argc > 4:
+                    step = arguments[4]
+
+                    try:
+                        n_step = Decimal(step.data)
+                    except decimal.InvalidOperation:
+                        errmsg = "invalid loop step"
+                        raise DirectiveError(errmsg, step) from None
+
+                else:
+                    n_step = Decimal(1 if n_start <= n_end else -1)
+
+                try:
+                    xrange = utils.xrange(n_start, n_end, n_step)
+                except ValueError as exc:
+                    errmsg = "invalid loop step"
+                    raise DirectiveError(errmsg, step) from exc
+
+                items = (
+                    ParsedToken(
+                        format(n, "f"),
+                        tag=ParsedTokenTag.PLAIN,
+                        meta={"depth": self.depth},
+                    )
+                    for n in itertools.chain(xrange, [n_end])
+                )
+
+            case _:
+                errmsg = "invalid loop range keyword"
+                raise DirectiveError(errmsg, range_keyword)
+
+        body = list(read_balanced(tokens, depth=0))
+        for token in body:
+            token.meta["depth"] += self.depth
+
+        for item in items:
+            with self.scoped():
+                self.defs[control_variable_name.data] = Definition(
+                    params=[],
+                    body=[item],
+                )
+
+                for token in body:
+                    yield token.clone()
 
 
 def preprocess(parser: ParserFn) -> ParserFn:
