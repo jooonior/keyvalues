@@ -37,26 +37,74 @@ class Section(Generic[T]):
 
 
 class KeyValues:
-    def __init__(self, parent: Section[KeyValues] | None = None) -> None:
-        self.parent: Section[KeyValues] | None = parent
-        self._children: list[Entry[KeyValues]] = []
+    def __init__(
+        self,
+        parent: Section[KeyValues] | None = None,
+        key: ParsedToken | None = None,
+        condition: ParsedToken | None = None,
+    ) -> None:
+        self.parent = parent
+        self.key = key
+        self.condition = condition
+
+        self._children: list[Entry[KeyValues] | None] = []
         self._by_key: CaseInsensitiveDict[int] = CaseInsensitiveDict()
         self._by_key_and_condition = self._by_key.copy()
 
     def __iter__(self) -> Iterator[Entry[KeyValues]]:
-        return iter(self._children)
+        for entry in self._children:
+            if entry is not None:
+                yield entry
 
     def at(self, index: int) -> Entry[KeyValues]:
-        return self._children[index]
+        entry = self._children[index]
+        if entry is None:
+            errmsg = "item has been deleted"
+            raise IndexError(errmsg)
+        return entry
 
-    def get(self, key: AnyToken) -> Entry[KeyValues] | None:
-        key = key.data
+    def _lookup(
+        self,
+        key: AnyToken,
+        condition: AnyToken | None,
+    ) -> tuple[str, str]:
+        by_key = key.data
+
+        by_key_and_condition = f"{key.data}\0"
+        if condition is not None:
+            by_key_and_condition += condition.data
+
+        return by_key, by_key_and_condition
+
+    def get(self, key: AnyToken | str) -> Entry[KeyValues] | None:
+        if not isinstance(key, str):
+            key = key.data
 
         index = self._by_key.get(key)
         if index is None:
             return None
 
-        return self._children[index]
+        entry = self._children[index]
+        assert entry is not None, "accessing deleted entry"
+
+        return entry
+
+    def delete(self, key: AnyToken | str) -> bool:
+        if not isinstance(key, str):
+            key = key.data
+
+        index = self._by_key.get(key)
+        if index is None:
+            return False
+
+        entry = self.at(index)
+        self._children[index] = None
+
+        by_key, by_key_and_condition = self._lookup(entry.key, entry.condition)
+        del self._by_key[by_key]
+        del self._by_key_and_condition[by_key_and_condition]
+
+        return True
 
     def walk(self, path: AnyToken) -> ParsedToken | KeyValues:
         section = self
@@ -104,15 +152,14 @@ class KeyValues:
         return index
 
     def insert(self, child: Entry[KeyValues]) -> int:
-        key = child.key.data
-        condition = "" if child.condition is None else child.condition.data
+        _, by_key_and_condition = self._lookup(child.key, child.condition)
+        index = self._by_key_and_condition.get(by_key_and_condition)
 
-        index = self._by_key_and_condition.get(f"{key}\0{condition}")
         if index is None:
             return self.append(child)
 
         new = child
-        old = self._children[index]
+        old = self.at(index)
         if isinstance(new.value, Section) and isinstance(old.value, Section):
             old.value.children.merge(new.value.children)
         else:
@@ -121,11 +168,11 @@ class KeyValues:
         return index
 
     def merge(self, other: KeyValues) -> None:
-        for child in other._children:  # noqa: SLF001
+        for child in other:
             self.insert(child)
 
     def tokens(self) -> Iterator[ParsedToken]:
-        for child in self._children:
+        for child in self:
             yield child.key
 
             if child.condition is not None:
@@ -189,7 +236,11 @@ class Builder:
     def open(self, token: ParsedToken) -> None:
         assert self._key is not None, "section without key"
         assert self._value is None, "open after value"
-        section = Section(token, KeyValues(self._stack[-1]), None)
+        section = Section(
+            token,
+            KeyValues(self._stack[-1], self._key, self._condition),
+            None,
+        )
         index = self._push(Entry(self._key, self._condition, section))
 
         # Inserted section might have been merged and discarded.

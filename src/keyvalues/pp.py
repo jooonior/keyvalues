@@ -38,6 +38,7 @@ from .parse import (
 )
 from .token import TokenError
 from .tree import KeyValues
+from .utils import CaseInsensitiveDict
 
 if TYPE_CHECKING:
     from .parse import ParserFn, ParserIO
@@ -551,6 +552,64 @@ class Preprocessor(Directives):
 
                 for token in body:
                     yield token.clone()
+
+    @Directives.directive("DELETE")
+    def do_DELETE(  # noqa: N802
+        self,
+        arguments: list[ParsedToken],
+        _tokens: Iterator[ParsedToken],
+    ) -> None:
+        if not arguments:
+            errmsg = "missing keys to delete"
+            raise DirectiveError(errmsg)
+
+        for key in arguments:
+            if not self.builder.get().delete(key):
+                errmsg = "key to delete not found"
+                raise DirectiveError(errmsg, key)
+
+    @Directives.directive("CLEAR")
+    def do_CLEAR(  # noqa: N802
+        self,
+        arguments: list[ParsedToken],
+        _tokens: Iterator[ParsedToken],
+    ) -> None:
+        whitelist = CaseInsensitiveDict({arg.data: arg for arg in arguments})
+        section = self.builder.get()
+
+        for entry in section:
+            key = entry.key.data
+            if key in whitelist:
+                whitelist.pop(key)
+            else:
+                section.delete(key)
+
+        if whitelist:
+            _, token = whitelist.popitem()
+            errmsg = "whitelisted key not found"
+            raise DirectiveError(errmsg, token)
+
+    @Directives.directive("MOVE")
+    def do_MOVE(  # noqa: N802
+        self,
+        arguments: list[ParsedToken],
+        _tokens: Iterator[ParsedToken],
+    ) -> None:
+        if not arguments:
+            errmsg = "missing keys to move"
+            raise DirectiveError(errmsg)
+
+        section = self.builder.get()
+
+        for key in arguments:
+            entry = section.get(key)
+
+            if entry is None:
+                errmsg = "key to delete not found"
+                raise DirectiveError(errmsg, key)
+
+            section.delete(entry.key)
+            section.append(entry)
 
 
 def preprocess(parser: ParserFn) -> ParserFn:
