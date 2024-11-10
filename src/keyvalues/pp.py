@@ -199,6 +199,7 @@ class Preprocessor(Directives):
         self.builder = builder
         self.depth = depth
         self.defs = ChainMap() if defs is None else ChainMap(defs, {})
+        self.compat: str | None = None
 
     def parse(self, tokens: ParserIO, _depth: int) -> Iterator[ParsedToken]:
         for token in tokens.output:
@@ -211,7 +212,7 @@ class Preprocessor(Directives):
                     self.depth -= 1
                     self.exit_scope()
 
-                case ParsedTokenRole.KEY:
+                case ParsedTokenRole.KEY if self.compat is None:
                     if token.tag == ParsedTokenTag.PLAIN and token.data == "{":
                         expanded = self.expand_directive(
                             tokens.input, self.depth
@@ -224,8 +225,18 @@ class Preprocessor(Directives):
                 case ParsedTokenRole.CONDITION:
                     pass
 
-                case ParsedTokenRole.VALUE:
+                case ParsedTokenRole.VALUE if self.compat is None:
                     token = self.evaluate_token(token)
+
+                case None if (
+                    self.compat is not None
+                    and token.tag == ParsedTokenTag.COMMENT
+                    and token.data.strip() == self.compat
+                ):
+                    self.compat = None
+                    self.builder.configure(merge=True)
+                    # Don't yield this special comment.
+                    continue
 
                 case _:
                     pass
@@ -610,6 +621,31 @@ class Preprocessor(Directives):
 
             section.delete(entry.key)
             section.append(entry)
+
+    @Directives.directive("PRAGMA")
+    def do_PRAGMA(  # noqa: N802
+        self,
+        arguments: list[ParsedToken],
+        _tokens: Iterator[ParsedToken],
+    ) -> None:
+        if not arguments:
+            errmsg = "missing pragma name"
+            raise DirectiveError(errmsg)
+
+        name = arguments[0]
+
+        match name.data.upper():
+            case "COMPAT":
+                if len(arguments) != 2:
+                    errmsg = "PRAGMA COMPAT expects one argument"
+                    raise DirectiveError(errmsg)
+
+                self.compat = arguments[1].data
+                self.builder.configure(merge=False)
+
+            case _:
+                errmsg = f'unknown pragma "{name.data}"'
+                raise DirectiveError(errmsg, name)
 
 
 def preprocess(parser: ParserFn) -> ParserFn:

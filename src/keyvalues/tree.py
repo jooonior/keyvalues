@@ -203,6 +203,16 @@ class Builder:
         self._value: ParsedToken | None = None
         self._stack = [Section(None, KeyValues(), None)]
         self._merge = True
+        self._merge_next = self._merge
+
+    def configure(
+        self,
+        *,
+        merge: bool | None = None,
+    ) -> None:
+        if merge is not None:
+            self._merge = merge
+            self._merge_next = merge
 
     def get(self) -> KeyValues:
         """Get the children of the inner-most currently open section."""
@@ -218,7 +228,7 @@ class Builder:
         self._push(Entry(self._key, self._condition, self._value))
         self._key = self._condition = self._value = None
 
-        self._merge = True  # reset to default
+        self._merge_next = self._merge  # reset to default
 
     def key(self, token: ParsedToken) -> None:
         self.commit()
@@ -259,7 +269,7 @@ class Builder:
     def macro(self, token: ParsedToken) -> None:
         self.key(token)
         # Don't merge macros.
-        self._merge = False
+        self._merge_next = False
 
     def token(self, token: ParsedToken) -> None:
         match token.meta.get("role"):
@@ -284,4 +294,6 @@ class Builder:
 
     def _push(self, child: Entry[KeyValues]) -> int:
         parent = self._stack[-1].children
-        return parent.insert(child) if self._merge else parent.append(child)
+        return (
+            parent.insert(child) if self._merge_next else parent.append(child)
+        )
