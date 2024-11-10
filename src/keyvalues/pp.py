@@ -395,11 +395,8 @@ class Preprocessor(Directives):
             errmsg = "missing name of expanded function"
             raise DirectiveError(errmsg)
 
-        arguments = iter(arguments)
-        name = next(arguments)
         arguments = [self.evaluate_token(arg) for arg in arguments]
-
-        return self.expand_definition(name, arguments)
+        return self.expand_definition(arguments[0], arguments[1:])
 
     @Directives.directive("INHERIT")
     def do_INHERIT(  # noqa: N802
@@ -412,7 +409,7 @@ class Preprocessor(Directives):
             raise DirectiveError(errmsg)
 
         arguments = iter(arguments)
-        name = next(arguments)
+        name = self.evaluate_token(next(arguments))
 
         parent = self.builder.get().walk(name)
         if not isinstance(parent, KeyValues):
@@ -475,31 +472,31 @@ class Preprocessor(Directives):
         arguments: list[ParsedToken],
         tokens: Iterator[ParsedToken],
     ) -> Iterator[ParsedToken]:
-        argc = len(arguments)
+        arguments = iter(arguments)
 
-        if argc < 1:
+        control_variable_name = next(arguments, None)
+        if control_variable_name is None:
             errmsg = "missing control variable name"
             raise DirectiveError(errmsg)
 
-        control_variable_name = arguments[0]
-
-        if argc <= 2:
+        range_keyword = next(arguments, None)
+        if range_keyword is None:
             errmsg = "missing loop range keyword"
             raise DirectiveError(errmsg)
 
-        range_keyword = arguments[1]
         items: Iterable[ParsedToken]
 
         match range_keyword.data.upper():
             case "IN":
-                items = arguments[2:]
+                items = map(self.evaluate_token, arguments)
 
             case "BETWEEN":
-                if argc < 3:
+                start = next(arguments, None)
+                if start is None:
                     errmsg = "missing loop start"
                     raise DirectiveError(errmsg)
 
-                start = arguments[2]
+                start = self.evaluate_token(start)
 
                 try:
                     n_start = Decimal(start.data)
@@ -507,11 +504,12 @@ class Preprocessor(Directives):
                     errmsg = "invalid loop start"
                     raise DirectiveError(errmsg, start) from None
 
-                if argc < 4:
+                end = next(arguments, None)
+                if end is None:
                     errmsg = "missing loop end"
                     raise DirectiveError(errmsg)
 
-                end = arguments[3]
+                end = self.evaluate_token(end)
 
                 try:
                     n_end = Decimal(end.data)
@@ -519,17 +517,17 @@ class Preprocessor(Directives):
                     errmsg = "invalid loop end"
                     raise DirectiveError(errmsg, end) from None
 
-                if argc > 4:
-                    step = arguments[4]
+                step = next(arguments, None)
+                if step is None:
+                    n_step = Decimal(1 if n_start <= n_end else -1)
+                else:
+                    step = self.evaluate_token(step)
 
                     try:
                         n_step = Decimal(step.data)
                     except decimal.InvalidOperation:
                         errmsg = "invalid loop step"
                         raise DirectiveError(errmsg, step) from None
-
-                else:
-                    n_step = Decimal(1 if n_start <= n_end else -1)
 
                 try:
                     xrange = utils.xrange(n_start, n_end, n_step)
@@ -574,6 +572,8 @@ class Preprocessor(Directives):
             errmsg = "missing keys to delete"
             raise DirectiveError(errmsg)
 
+        arguments = map(self.evaluate_token, arguments)
+
         for key in arguments:
             if not self.builder.get().delete(key):
                 errmsg = "key to delete not found"
@@ -585,6 +585,7 @@ class Preprocessor(Directives):
         arguments: list[ParsedToken],
         _tokens: Iterator[ParsedToken],
     ) -> None:
+        arguments = map(self.evaluate_token, arguments)
         whitelist = CaseInsensitiveDict({arg.data: arg for arg in arguments})
         section = self.builder.get()
 
@@ -610,6 +611,7 @@ class Preprocessor(Directives):
             errmsg = "missing keys to move"
             raise DirectiveError(errmsg)
 
+        arguments = map(self.evaluate_token, arguments)
         section = self.builder.get()
 
         for key in arguments:
