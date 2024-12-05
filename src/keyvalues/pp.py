@@ -580,16 +580,13 @@ class Preprocessor(Directives):
         whitelist = CaseInsensitiveDict({arg.data: arg for arg in arguments})
         section = self.builder.get()
 
-        for entry in section:
-            key = entry.key.data
-            if key in whitelist:
-                whitelist.pop(key)
-            else:
-                section.delete(key)
+        section.purge(
+            lambda entry: whitelist.pop(entry.key.data, None) is not None,
+        )
 
         if whitelist:
             _, token = whitelist.popitem()
-            errmsg = "whitelisted key not found"
+            errmsg = f'whitelisted key "{token.data}" not found'
             raise DirectiveError(errmsg, token)
 
     @Directives.directive("MOVE")
@@ -605,10 +602,10 @@ class Preprocessor(Directives):
             entry = section.get(key)
 
             if entry is None:
-                errmsg = "key to delete not found"
+                errmsg = f'key "{key.data}" not found'
                 raise DirectiveError(errmsg, key)
 
-            section.delete(entry.key)
+            section.delete(entry.key, entry.condition)
             section.append(entry)
 
     @Directives.directive("PRAGMA")

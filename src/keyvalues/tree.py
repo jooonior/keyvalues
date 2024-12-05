@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import EllipsisType
 from typing import (
     TYPE_CHECKING,
     Generic,
     TypeVar,
     assert_never,
+    overload,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from typing import Callable, Concatenate, ParamSpec
 
 from .parse import ParsedToken, ParsedTokenRole, ParsedTokenTag
-from .token import TokenError
+from .token import Token, TokenError
 from .utils import CaseInsensitiveDict
 
 if TYPE_CHECKING:
@@ -36,6 +39,10 @@ class Section(Generic[T]):
     close: ParsedToken | None
 
 
+if TYPE_CHECKING:
+    P = ParamSpec("P")
+
+
 class KeyValues:
     def __init__(
         self,
@@ -48,7 +55,7 @@ class KeyValues:
         self.condition = condition
 
         self._children: list[Entry[KeyValues] | None] = []
-        self._by_key: CaseInsensitiveDict[int] = CaseInsensitiveDict()
+        self._by_key: CaseInsensitiveDict[list[int]] = CaseInsensitiveDict()
         self._by_key_and_condition = self._by_key.copy()
 
     def __iter__(self) -> Iterator[Entry[KeyValues]]:
@@ -63,37 +70,72 @@ class KeyValues:
             raise IndexError(errmsg)
         return entry
 
+    @overload
     def _lookup(
         self,
         key: AnyToken,
         condition: AnyToken | None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str]: ...
+
+    @overload
+    def _lookup(
+        self,
+        key: AnyToken,
+        condition: EllipsisType = ...,
+    ) -> tuple[str, None]: ...
+
+    def _lookup(
+        self,
+        key: AnyToken,
+        condition: AnyToken | None | EllipsisType = Ellipsis,
+    ) -> tuple[str, str | None]:
         by_key = key.data
 
-        by_key_and_condition = f"{key.data}\0"
-        if condition is not None:
-            by_key_and_condition += condition.data
+        match condition:
+            case EllipsisType():
+                by_key_and_condition = None
+            case None:
+                by_key_and_condition = f"{key.data}\0"
+            case Token():
+                by_key_and_condition = f"{key.data}\0{condition.data}"
+            case _ as unreachable:
+                assert_never(unreachable)
 
         return by_key, by_key_and_condition
 
-    def get(self, key: AnyToken | str) -> Entry[KeyValues] | None:
-        if not isinstance(key, str):
-            key = key.data
+    def index(
+        self,
+        key: AnyToken,
+        condition: AnyToken | None | EllipsisType = Ellipsis,
+    ) -> int | None:
+        by_key, by_key_and_condition = self._lookup(key, condition)
 
-        index = self._by_key.get(key)
+        if by_key_and_condition is None:
+            indices = self._by_key.get(by_key)
+        else:
+            indices = self._by_key_and_condition.get(by_key_and_condition)
+
+        return indices[-1] if indices else None
+
+    def get(
+        self,
+        key: AnyToken,
+        condition: AnyToken | None | EllipsisType = Ellipsis,
+    ) -> Entry[KeyValues] | None:
+        index = self.index(key, condition)
+
         if index is None:
             return None
 
-        entry = self._children[index]
-        assert entry is not None, "accessing deleted entry"
+        return self._children[index]
 
-        return entry
+    def delete(
+        self,
+        key: AnyToken,
+        condition: AnyToken | None | EllipsisType = Ellipsis,
+    ) -> bool:
+        index = self.index(key, condition)
 
-    def delete(self, key: AnyToken | str) -> bool:
-        if not isinstance(key, str):
-            key = key.data
-
-        index = self._by_key.get(key)
         if index is None:
             return False
 
@@ -101,10 +143,32 @@ class KeyValues:
         self._children[index] = None
 
         by_key, by_key_and_condition = self._lookup(entry.key, entry.condition)
-        del self._by_key[by_key]
-        del self._by_key_and_condition[by_key_and_condition]
+        self._by_key[by_key].remove(index)
+        self._by_key_and_condition[by_key_and_condition].remove(index)
 
         return True
+
+    def purge(
+        self,
+        predicate: Callable[Concatenate[Entry[KeyValues], P], bool],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> None:
+        """Delete all children except ones that satisfy `predicate`."""
+        # Last entries should be processed first.
+        children = [
+            child
+            for child in reversed(self._children)
+            if child is not None and predicate(child, *args, **kwargs)
+        ]
+
+        self._children = []
+        self._by_key.clear()
+        self._by_key_and_condition.clear()
+
+        # Append in original order.
+        for child in reversed(children):
+            self.append(child)
 
     def walk(self, path: AnyToken) -> ParsedToken | KeyValues:
         section = self
@@ -141,19 +205,19 @@ class KeyValues:
         return section
 
     def append(self, child: Entry[KeyValues]) -> int:
-        key = child.key.data
-        condition = "" if child.condition is None else child.condition.data
+        by_key, by_key_and_condition = self._lookup(child.key, child.condition)
 
         index = len(self._children)
-        self._by_key[key] = index
-        self._by_key_and_condition[f"{key}\0{condition}"] = index
+        self._by_key.setdefault(by_key, []).append(index)
+        self._by_key_and_condition.setdefault(by_key_and_condition, []).append(
+            index
+        )
 
         self._children.append(child)
         return index
 
     def insert(self, child: Entry[KeyValues]) -> int:
-        _, by_key_and_condition = self._lookup(child.key, child.condition)
-        index = self._by_key_and_condition.get(by_key_and_condition)
+        index = self.index(child.key, child.condition)
 
         if index is None:
             return self.append(child)
