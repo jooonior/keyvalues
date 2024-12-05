@@ -568,10 +568,6 @@ class Preprocessor(Directives):
         arguments: list[ParsedToken],
         _tokens: Iterator[ParsedToken],
     ) -> None:
-        if not arguments:
-            errmsg = "missing keys to delete"
-            raise DirectiveError(errmsg)
-
         arguments = map(self.evaluate_token, arguments)
 
         for key in arguments:
@@ -607,10 +603,6 @@ class Preprocessor(Directives):
         arguments: list[ParsedToken],
         _tokens: Iterator[ParsedToken],
     ) -> None:
-        if not arguments:
-            errmsg = "missing keys to move"
-            raise DirectiveError(errmsg)
-
         arguments = map(self.evaluate_token, arguments)
         section = self.builder.get()
 
