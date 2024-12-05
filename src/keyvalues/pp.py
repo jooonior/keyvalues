@@ -290,16 +290,11 @@ class Preprocessor(Directives):
         if isinstance(target, ParsedToken):
             return target
 
-        if target.parent is None:
+        if target.key is None:
             errmsg = "path refers to name of the root section"
             raise PreprocessorError(errmsg, path)
 
-        # TODO: Should not have to go though all siblings.
-        return next(
-            entry.key
-            for entry in target.parent.children
-            if entry.value is target
-        )
+        return target.key
 
     def evaluate_definition(
         self,
